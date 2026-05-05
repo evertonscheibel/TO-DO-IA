@@ -1,0 +1,1 @@
+console.log('Checklists count: ' + data.checklists.length)

@@ -1,0 +1,17 @@
+import axios from 'axios';
+
+const api = axios.create({
+    baseURL: `http://${window.location.hostname}:3015/api`,
+    headers: { 'Content-Type': 'application/json' }
+});
+
+// JWT interceptor
+api.interceptors.request.use((config) => {
+    const token = localStorage.getItem('token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
+export default api;

@@ -1,0 +1,314 @@
+.task-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.6);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    z-index: 1000;
+    padding: 48px 16px;
+    overflow-y: auto;
+}
+
+.task-modal-content {
+    background-color: #f4f5f7;
+    width: 100%;
+    max-width: 768px;
+    border-radius: 8px;
+    padding: 24px;
+    position: relative;
+    color: #172b4d;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    box-shadow: 0 8px 16px -4px rgba(9, 30, 66, 0.25), 0 0 0 1px rgba(9, 30, 66, 0.08);
+}
+
+.task-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+
+.task-modal-title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.task-modal-title-row h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 24px;
+    color: #172b4d;
+}
+
+.task-modal-icon {
+    color: #42526e;
+    margin-top: 2px;
+}
+
+.task-modal-meta {
+    margin-left: 36px;
+    font-size: 14px;
+    color: #5e6c84;
+    margin-bottom: 24px;
+}
+
+.task-modal-body {
+    display: flex;
+    gap: 24px;
+}
+
+.task-modal-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+.task-modal-sidebar {
+    width: 168px;
+    flex-shrink: 0;
+}
+
+/* Sections */
+.task-section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    color: #172b4d;
+}
+
+.task-section-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+/* Description */
+.desc-display {
+    margin-left: 36px;
+    cursor: pointer;
+    min-height: 48px;
+    padding: 8px 12px;
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.desc-display:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+.desc-display.empty {
+    background-color: rgba(9, 30, 66, 0.04);
+    color: #172b4d;
+}
+
+.desc-display.empty:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+.desc-edit-container {
+    margin-left: 36px;
+}
+
+.desc-edit-container textarea {
+    width: 100%;
+    min-height: 108px;
+    padding: 8px 12px;
+    border: 2px solid #4c9aff;
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 20px;
+    resize: vertical;
+    outline: none;
+    background-color: #fff;
+    margin-bottom: 8px;
+    font-family: inherit;
+}
+
+.desc-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* Checklist */
+.checklist-header {
+    justify-content: space-between;
+}
+
+.checklist-title-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.checklist-progress-container {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: 36px;
+    margin-bottom: 16px;
+}
+
+.progress-text {
+    font-size: 11px;
+    color: #5e6c84;
+    width: 32px;
+    text-align: right;
+}
+
+.progress-bar-bg {
+    flex: 1;
+    height: 8px;
+    background-color: rgba(9, 30, 66, 0.08);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background-color: #5ba4cf;
+    transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.progress-bar-fill.complete {
+    background-color: #61bd4f;
+}
+
+.checklist-items {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-left: 36px;
+    margin-bottom: 12px;
+}
+
+.checklist-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 6px;
+    border-radius: 3px;
+    position: relative;
+}
+
+.checklist-item:hover {
+    background-color: rgba(9, 30, 66, 0.04);
+}
+
+.checklist-item input[type="checkbox"] {
+    margin-top: 4px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.item-text {
+    flex: 1;
+    font-size: 14px;
+    line-height: 20px;
+    color: #172b4d;
+    word-break: break-word;
+}
+
+.item-text.completed {
+    text-decoration: line-through;
+    color: #5e6c84;
+}
+
+.item-delete {
+    opacity: 0;
+    transition: opacity 0.2s;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: #5e6c84;
+    padding: 4px;
+    border-radius: 3px;
+}
+
+.item-delete:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+    color: #172b4d;
+}
+
+.checklist-item:hover .item-delete {
+    opacity: 1;
+}
+
+.checklist-actions {
+    margin-left: 36px;
+}
+
+/* Sidebar */
+.sidebar-module h4 {
+    font-size: 12px;
+    font-weight: 600;
+    color: #5e6c84;
+    margin: 0 0 8px 0;
+    text-transform: uppercase;
+}
+
+.btn-sidebar {
+    width: 100%;
+    text-align: left;
+    background-color: rgba(9, 30, 66, 0.04);
+    border: none;
+    border-radius: 3px;
+    padding: 6px 12px;
+    color: #172b4d;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    transition: background-color 0.2s;
+    position: relative;
+}
+
+.invisible-select, .invisible-date {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 10;
+    border: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.btn-sidebar:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+.btn-sidebar.btn-danger {
+    color: #ae2a19;
+}
+
+.btn-sidebar.btn-danger:hover {
+    background-color: #ffd5d2;
+    color: #ae2a19;
+}
+
+/* Button overrides for modal context */
+.task-modal-content .btn-secondary {
+    background-color: rgba(9, 30, 66, 0.04);
+    color: #172b4d;
+    border: none;
+}
+
+.task-modal-content .btn-secondary:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}

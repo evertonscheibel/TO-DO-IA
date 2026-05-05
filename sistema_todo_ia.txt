@@ -1,0 +1,5274 @@
+# TO DO IA - SISTEMA COMPLETO
+
+Este arquivo contém todo o código atualizado do sistema para análise de IA.
+
+================================================================================
+Arquivo: backend\package.json
+================================================================================
+
+{
+  "name": "gestao-pj-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Gestão PJ - Multiuser PJ Management System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "seed": "node src/seed.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-validator": "^7.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.10.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
+
+
+================================================================================
+Arquivo: backend\server.js
+================================================================================
+
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const mongoose = require('mongoose');
+
+const authRoutes = require('./src/routes/auth');
+const userRoutes = require('./src/routes/users');
+const providerRoutes = require('./src/routes/providers');
+const taskRoutes = require('./src/routes/tasks');
+const activityRoutes = require('./src/routes/activities');
+const reportRoutes = require('./src/routes/reports');
+const importRoutes = require('./src/routes/import');
+
+const errorHandler = require('./src/middleware/errorHandler');
+
+const app = express();
+
+// Middleware
+app.use(cors({ origin: [process.env.CORS_ORIGIN || 'http://localhost:7153', 'http://10.1.1.129:7153'], credentials: true }));
+app.use(express.json({ limit: '10mb' }));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/providers', providerRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/activities', activityRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/admin', importRoutes);
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, data: { status: 'running', timestamp: new Date() } });
+});
+
+// Error handler
+app.use(errorHandler);
+
+// Connect to MongoDB and start server
+const PORT = process.env.PORT || 3015;
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/gestao-pj';
+
+mongoose.connect(MONGO_URI)
+  .then(() => {
+    console.log('✅ MongoDB conectado');
+    app.listen(PORT, () => {
+      console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('❌ Erro ao conectar no MongoDB:', err.message);
+    process.exit(1);
+  });
+
+
+================================================================================
+Arquivo: backend\src\helpers.js
+================================================================================
+
+const Activity = require('./models/Activity');
+
+/**
+ * Log an activity for audit/timeline.
+ * @param {Object} params
+ * @param {string} params.action
+ * @param {string} params.message
+ * @param {string} params.entityType
+ * @param {ObjectId} params.entityId
+ * @param {ObjectId} params.actorId
+ * @param {string} params.actorRole
+ * @param {ObjectId} params.managerId - optional, used for scoping
+ */
+async function logActivity({ action, message, entityType, entityId, actorId, actorRole, managerId }) {
+    try {
+        // If managerId is not provided and actor is gestor, use actorId as managerId
+        const mId = managerId || (actorRole === 'gestor' ? actorId : null);
+        await Activity.create({ action, message, entityType, entityId, actorId, actorRole, managerId: mId });
+    } catch (err) {
+        console.error('Erro ao registrar atividade:', err.message);
+    }
+}
+
+/**
+ * Build scope filter for queries based on user role.
+ * Admin gets all, Gestor gets only their own scope.
+ */
+function scopeFilter(user) {
+    if (user.role === 'admin') return {};
+    return { managerId: user._id };
+}
+
+module.exports = { logActivity, scopeFilter };
+
+
+================================================================================
+Arquivo: backend\src\middleware\auth.js
+================================================================================
+
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+const auth = async (req, res, next) => {
+    try {
+        let user = await User.findOne({ role: 'admin', status: 'ativo' }).select('-passwordHash');
+        if (!user) {
+            user = { _id: '000000000000000000000000', name: 'Admin Bypassed', role: 'admin', email: 'admin@local' };
+        }
+        req.user = user;
+        next();
+    } catch (err) {
+        next(err);
+    }
+};
+
+const requireRole = (...roles) => {
+    return (req, res, next) => {
+        if (!req.user || !roles.includes(req.user.role)) {
+            return res.status(403).json({ ok: false, error: 'Acesso negado' });
+        }
+        next();
+    };
+};
+
+module.exports = { auth, requireRole };
+
+
+================================================================================
+Arquivo: backend\src\middleware\errorHandler.js
+================================================================================
+
+module.exports = (err, req, res, next) => {
+    console.error('❌ Erro:', err.message || err);
+
+    if (err.name === 'ValidationError') {
+        const errors = Object.values(err.errors).map(e => e.message);
+        return res.status(400).json({ ok: false, error: errors.join(', ') });
+    }
+
+    if (err.code === 11000) {
+        const field = Object.keys(err.keyPattern)[0];
+        return res.status(409).json({ ok: false, error: `Valor duplicado para o campo: ${field}` });
+    }
+
+    if (err.name === 'CastError') {
+        return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+
+    res.status(err.statusCode || 500).json({
+        ok: false,
+        error: err.message || 'Erro interno do servidor'
+    });
+};
+
+
+================================================================================
+Arquivo: backend\src\models\Activity.js
+================================================================================
+
+const mongoose = require('mongoose');
+
+const activitySchema = new mongoose.Schema({
+    action: { type: String, required: true },
+    message: { type: String, required: true },
+    entityType: { type: String, enum: ['task', 'provider', 'user'], required: true },
+    entityId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    actorRole: { type: String, default: '' },
+    managerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+}, { timestamps: { createdAt: true, updatedAt: false } });
+
+activitySchema.index({ createdAt: -1 });
+activitySchema.index({ managerId: 1 });
+activitySchema.index({ actorId: 1 });
+activitySchema.index({ entityType: 1 });
+
+module.exports = mongoose.model('Activity', activitySchema);
+
+
+================================================================================
+Arquivo: backend\src\models\Provider.js
+================================================================================
+
+const mongoose = require('mongoose');
+
+const providerSchema = new mongoose.Schema({
+    name: { type: String, required: true, trim: true },
+    cnpj: { type: String, unique: true, trim: true, sparse: true },
+    email: { type: String, default: '', lowercase: true, trim: true },
+    phone: { type: String, default: '' },
+    specialty: { type: String, default: '' },
+    status: { type: String, enum: ['ativo', 'inativo'], default: 'ativo' },
+    notes: { type: String, default: '' },
+    managerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+}, { timestamps: true });
+
+providerSchema.index({ name: 'text' });
+providerSchema.index({ cnpj: 1 }, { unique: true, sparse: true });
+providerSchema.index({ managerId: 1 });
+
+module.exports = mongoose.model('Provider', providerSchema);
+
+
+================================================================================
+Arquivo: backend\src\models\Task.js
+================================================================================
+
+const mongoose = require('mongoose');
+
+const taskSchema = new mongoose.Schema({
+    title: { type: String, required: true, trim: true },
+    description: { type: String, default: '' },
+    priority: { type: String, enum: ['baixa', 'media', 'alta', 'urgente'], default: 'media' },
+    dueDate: { type: Date, default: null },
+    status: {
+        type: String,
+        enum: ['pendente', 'backlog', 'todo', 'em-andamento', 'revisao', 'concluido'],
+        default: 'backlog'
+    },
+    providerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Provider', default: null },
+    managerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    archived: { type: Boolean, default: false },
+    checklists: [{
+        title: { type: String, required: true },
+        items: [{
+            text: { type: String, required: true },
+            isCompleted: { type: Boolean, default: false }
+        }]
+    }]
+}, { timestamps: true });
+
+taskSchema.index({ status: 1 });
+taskSchema.index({ managerId: 1 });
+taskSchema.index({ providerId: 1 });
+taskSchema.index({ dueDate: 1 });
+taskSchema.index({ archived: 1 });
+
+module.exports = mongoose.model('Task', taskSchema);
+
+
+================================================================================
+Arquivo: backend\src\models\User.js
+================================================================================
+
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const userSchema = new mongoose.Schema({
+    name: { type: String, required: true, trim: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    phone: { type: String, default: '' },
+    role: { type: String, enum: ['admin', 'gestor'], required: true },
+    status: { type: String, enum: ['ativo', 'inativo'], default: 'ativo' },
+    passwordHash: { type: String, required: true }
+}, { timestamps: true });
+
+userSchema.pre('save', async function (next) {
+    if (!this.isModified('passwordHash')) return next();
+    this.passwordHash = await bcrypt.hash(this.passwordHash, 10);
+    next();
+});
+
+userSchema.methods.comparePassword = async function (password) {
+    return bcrypt.compare(password, this.passwordHash);
+};
+
+userSchema.methods.toSafe = function () {
+    const obj = this.toObject();
+    delete obj.passwordHash;
+    return obj;
+};
+
+module.exports = mongoose.model('User', userSchema);
+
+
+================================================================================
+Arquivo: backend\src\routes\activities.js
+================================================================================
+
+const router = require('express').Router();
+const Activity = require('../models/Activity');
+const Task = require('../models/Task');
+const Provider = require('../models/Provider');
+const { auth } = require('../middleware/auth');
+
+router.use(auth);
+
+// GET /api/activities
+router.get('/', async (req, res, next) => {
+    try {
+        const { page = 1, limit = 20 } = req.query;
+        let filter = {};
+
+        // Gestor: only activities related to their scope using the new managerId field
+        if (req.user.role === 'gestor') {
+            filter = { managerId: req.user._id };
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const [activities, total] = await Promise.all([
+            Activity.find(filter)
+                .populate('actorId', 'name')
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit)),
+            Activity.countDocuments(filter)
+        ]);
+
+        res.json({ ok: true, data: { activities, total, page: parseInt(page), limit: parseInt(limit) } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\routes\auth.js
+================================================================================
+
+const router = require('express').Router();
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const { auth } = require('../middleware/auth');
+
+// POST /api/auth/login
+router.post('/login', async (req, res, next) => {
+    try {
+        const { email, password } = req.body;
+        if (!email || !password) {
+            return res.status(400).json({ ok: false, error: 'Email e senha são obrigatórios' });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        if (!user) {
+            return res.status(401).json({ ok: false, error: 'Credenciais inválidas' });
+        }
+
+        if (user.status === 'inativo') {
+            return res.status(403).json({ ok: false, error: 'Usuário inativo' });
+        }
+
+        const valid = await user.comparePassword(password);
+        if (!valid) {
+            return res.status(401).json({ ok: false, error: 'Credenciais inválidas' });
+        }
+
+        const token = jwt.sign(
+            { id: user._id, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+
+        res.json({ ok: true, data: { token, user: user.toSafe() } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/auth/me
+router.get('/me', auth, (req, res) => {
+    res.json({ ok: true, data: { user: req.user } });
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\routes\import.js
+================================================================================
+
+const router = require('express').Router();
+const mongoose = require('mongoose');
+const Provider = require('../models/Provider');
+const Task = require('../models/Task');
+const Activity = require('../models/Activity');
+const { auth, requireRole } = require('../middleware/auth');
+const { logActivity } = require('../helpers');
+
+router.use(auth, requireRole('admin'));
+
+// POST /api/admin/import
+router.post('/import', async (req, res, next) => {
+    try {
+        const { prestadores = [], tarefas = [], atividades = [] } = req.body;
+        const idMap = {}; // old id -> new ObjectId
+        let importedProviders = 0;
+        let importedTasks = 0;
+        let importedActivities = 0;
+
+        // Import providers
+        for (const p of prestadores) {
+            const oldId = p.id || p._id;
+            const existing = p.cnpj ? await Provider.findOne({ cnpj: p.cnpj }) : null;
+            if (existing) {
+                idMap[oldId] = existing._id;
+                continue;
+            }
+
+            const provider = await Provider.create({
+                name: p.name || p.nome || 'Sem nome',
+                cnpj: p.cnpj || `IMPORT-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+                email: p.email || '',
+                phone: p.phone || p.telefone || '',
+                specialty: p.specialty || p.especialidade || '',
+                status: p.status || 'ativo',
+                notes: p.notes || p.observacoes || '',
+                managerId: null
+            });
+
+            idMap[oldId] = provider._id;
+            importedProviders++;
+        }
+
+        // Import tasks
+        for (const t of tarefas) {
+            const oldId = t.id || t._id;
+            const providerId = t.providerId || t.prestadorId;
+            const mappedProviderId = providerId ? (idMap[providerId] || null) : null;
+
+            const task = await Task.create({
+                title: t.title || t.titulo || 'Sem título',
+                description: t.description || t.descricao || '',
+                priority: t.priority || t.prioridade || 'media',
+                dueDate: t.dueDate || t.prazo || null,
+                status: t.status || 'pendente',
+                providerId: mappedProviderId,
+                managerId: req.user._id,
+                createdBy: req.user._id,
+                updatedBy: req.user._id
+            });
+
+            idMap[oldId] = task._id;
+            importedTasks++;
+        }
+
+        // Import activities
+        for (const a of atividades) {
+            const entityId = a.entityId ? (idMap[a.entityId] || new mongoose.Types.ObjectId()) : new mongoose.Types.ObjectId();
+            await Activity.create({
+                action: a.action || a.tipo || 'IMPORT',
+                message: a.message || a.mensagem || 'Atividade importada',
+                entityType: a.entityType || 'task',
+                entityId,
+                actorId: req.user._id,
+                actorRole: req.user.role
+            });
+            importedActivities++;
+        }
+
+        // Log import completion
+        await logActivity({
+            action: 'IMPORT_COMPLETED',
+            message: `Importação concluída: ${importedProviders} prestadores, ${importedTasks} tarefas, ${importedActivities} atividades`,
+            entityType: 'user',
+            entityId: req.user._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({
+            ok: true,
+            data: {
+                importedProviders,
+                importedTasks,
+                importedActivities,
+                idMap
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\routes\providers.js
+================================================================================
+
+const router = require('express').Router();
+const Provider = require('../models/Provider');
+const { auth } = require('../middleware/auth');
+const { logActivity, scopeFilter } = require('../helpers');
+
+router.use(auth);
+
+// GET /api/providers
+router.get('/', async (req, res, next) => {
+    try {
+        const { status, managerId, q, page = 1, limit = 50 } = req.query;
+        const filter = { ...scopeFilter(req.user) };
+
+        if (status) filter.status = status;
+        // Gestor ignores managerId from query — scopeFilter already applied
+        if (managerId && req.user.role === 'admin') filter.managerId = managerId;
+        if (q) {
+            filter.$or = [
+                { name: { $regex: q, $options: 'i' } },
+                { cnpj: { $regex: q, $options: 'i' } }
+            ];
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const [providers, total] = await Promise.all([
+            Provider.find(filter).populate('managerId', 'name email').sort({ name: 1 }).skip(skip).limit(parseInt(limit)),
+            Provider.countDocuments(filter)
+        ]);
+
+        res.json({ ok: true, data: { providers, total, page: parseInt(page), limit: parseInt(limit) } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/providers
+router.post('/', async (req, res, next) => {
+    try {
+        const { name, cnpj, email, phone, specialty, status, notes, managerId } = req.body;
+        if (!name) {
+            return res.status(400).json({ ok: false, error: 'Nome é obrigatório' });
+        }
+
+        const data = { name, cnpj, email, phone, specialty, status, notes };
+        // Admin can set managerId; Gestor always assigns self
+        if (req.user.role === 'admin') {
+            data.managerId = managerId || null;
+        } else {
+            data.managerId = req.user._id;
+        }
+
+        const provider = await Provider.create(data);
+
+        await logActivity({
+            action: 'PROVIDER_CREATED',
+            message: `Contratante "${name}" ${cnpj ? `(CNPJ: ${cnpj}) ` : ''}criado`,
+            entityType: 'provider',
+            entityId: provider._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.status(201).json({ ok: true, data: { provider } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/providers/:id
+router.get('/:id', async (req, res, next) => {
+    try {
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        if (!provider) return res.status(404).json({ ok: false, error: 'Contratante não encontrado' });
+        res.json({ ok: true, data: { provider } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// PATCH /api/providers/:id
+router.patch('/:id', async (req, res, next) => {
+    try {
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const provider = await Provider.findOne(filter);
+        if (!provider) return res.status(404).json({ ok: false, error: 'Contratante não encontrado' });
+
+        const { name, cnpj, email, phone, specialty, status, notes, managerId } = req.body;
+        if (name) provider.name = name;
+        if (cnpj) provider.cnpj = cnpj;
+        if (email !== undefined) provider.email = email;
+        if (phone !== undefined) provider.phone = phone;
+        if (specialty !== undefined) provider.specialty = specialty;
+        if (status) provider.status = status;
+        if (notes !== undefined) provider.notes = notes;
+        // Only admin can change managerId
+        if (req.user.role === 'admin' && managerId !== undefined) {
+            provider.managerId = managerId || null;
+        }
+
+        await provider.save();
+
+        await logActivity({
+            action: 'PROVIDER_UPDATED',
+            message: `Contratante "${provider.name}" atualizado`,
+            entityType: 'provider',
+            entityId: provider._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { provider } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// DELETE /api/providers/:id
+router.delete('/:id', async (req, res, next) => {
+    try {
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const provider = await Provider.findOne(filter);
+        if (!provider) return res.status(404).json({ ok: false, error: 'Prestador não encontrado' });
+
+        await Provider.findByIdAndDelete(req.params.id);
+
+        await logActivity({
+            action: 'PROVIDER_DELETED',
+            message: `Contratante "${provider.name}" removido`,
+            entityType: 'provider',
+            entityId: provider._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { message: 'Contratante removido' } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\routes\reports.js
+================================================================================
+
+const router = require('express').Router();
+const Task = require('../models/Task');
+const Provider = require('../models/Provider');
+const Activity = require('../models/Activity');
+const { auth, requireRole } = require('../middleware/auth');
+const { scopeFilter } = require('../helpers');
+
+router.use(auth);
+
+// GET /api/reports/summary
+router.get('/summary', async (req, res, next) => {
+    try {
+        const scope = scopeFilter(req.user);
+        const now = new Date();
+
+        // Use facets to count everything in one pass
+        const stats = await Task.aggregate([
+            { $match: scope },
+            {
+                $facet: {
+                    pendentes: [{ $match: { status: { $in: ['pendente', 'backlog', 'todo'] } } }, { $count: 'count' }],
+                    emAndamento: [{ $match: { status: { $in: ['em-andamento', 'revisao'] } } }, { $count: 'count' }],
+                    concluidas: [{ $match: { status: 'concluido' } }, { $count: 'count' }],
+                    atrasadas: [
+                        { $match: { dueDate: { $lt: now }, status: { $nin: ['concluido'] } } },
+                        { $count: 'count' }
+                    ]
+                }
+            }
+        ]);
+
+        const totalProvidersAtivos = await Provider.countDocuments({ ...scope, status: 'ativo' });
+
+        res.json({
+            ok: true,
+            data: {
+                totalProvidersAtivos,
+                totalTasksPendentes: stats[0].pendentes[0]?.count || 0,
+                totalTasksEmAndamento: stats[0].emAndamento[0]?.count || 0,
+                totalTasksConcluidas: stats[0].concluidas[0]?.count || 0,
+                totalOverdue: stats[0].atrasadas[0]?.count || 0
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/reports/provider-performance
+router.get('/provider-performance', async (req, res, next) => {
+    try {
+        const scope = scopeFilter(req.user);
+        const now = new Date();
+
+        // Aggregate performance for all providers in scope at once
+        const performance = await Task.aggregate([
+            { $match: scope },
+            { $match: { providerId: { $ne: null } } },
+            {
+                $group: {
+                    _id: '$providerId',
+                    total: { $sum: 1 },
+                    concluidas: {
+                        $sum: { $cond: [{ $eq: ['$status', 'concluido'] }, 1, 0] }
+                    },
+                    atrasadas: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $lt: ['$dueDate', now] },
+                                        { $ne: ['$status', 'concluido'] },
+                                        { $ne: ['$dueDate', null] }
+                                    ]
+                                },
+                                1,
+                                0
+                            ]
+                        }
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'providers',
+                    localField: '_id',
+                    foreignField: '_id',
+                    as: 'providerInfo'
+                }
+            },
+            { $unwind: '$providerInfo' },
+            {
+                $project: {
+                    provider: { _id: '$providerInfo._id', name: '$providerInfo.name', cnpj: '$providerInfo.cnpj' },
+                    total: 1,
+                    concluidas: 1,
+                    atrasadas: 1,
+                    percentual: {
+                        $cond: [
+                            { $gt: ['$total', 0] },
+                            { $round: [{ $multiply: [{ $divide: ['$concluidas', '$total'] }, 100] }] },
+                            0
+                        ]
+                    }
+                }
+            },
+            { $sort: { total: -1 } }
+        ]);
+
+        res.json({ ok: true, data: { performance } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/reports/manager-performance (admin only)
+router.get('/manager-performance', requireRole('admin'), async (req, res, next) => {
+    try {
+        const now = new Date();
+        const performance = await Task.aggregate([
+            {
+                $group: {
+                    _id: '$managerId',
+                    total: { $sum: 1 },
+                    concluidas: {
+                        $sum: { $cond: [{ $eq: ['$status', 'concluido'] }, 1, 0] }
+                    },
+                    atrasadas: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $lt: ['$dueDate', now] },
+                                        { $ne: ['$status', 'concluido'] },
+                                        { $ne: ['$dueDate', null] }
+                                    ]
+                                },
+                                1,
+                                0
+                            ]
+                        }
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: '_id',
+                    foreignField: '_id',
+                    as: 'manager'
+                }
+            },
+            { $unwind: '$manager' },
+            {
+                $project: {
+                    manager: { _id: '$manager._id', name: '$manager.name', email: '$manager.email', role: '$manager.role' },
+                    total: 1,
+                    concluidas: 1,
+                    atrasadas: 1,
+                    percentual: {
+                        $cond: [
+                            { $gt: ['$total', 0] },
+                            { $round: [{ $multiply: [{ $divide: ['$concluidas', '$total'] }, 100] }] },
+                            0
+                        ]
+                    }
+                }
+            },
+            { $sort: { total: -1 } }
+        ]);
+
+        res.json({ ok: true, data: { performance } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/reports/task-distribution
+router.get('/task-distribution', async (req, res, next) => {
+    try {
+        const scope = scopeFilter(req.user);
+
+        const distributionData = await Task.aggregate([
+            { $match: scope },
+            { $group: { _id: '$status', count: { $sum: 1 } } }
+        ]);
+
+        const statuses = ['pendente', 'backlog', 'todo', 'em-andamento', 'revisao', 'concluido'];
+        const distribution = statuses.map(s => {
+            const row = distributionData.find(d => d._id === s);
+            return { status: s, count: row ? row.count : 0 };
+        });
+
+        res.json({ ok: true, data: { distribution } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/reports/timeline
+router.get('/timeline', async (req, res, next) => {
+    try {
+        const { limit = 20 } = req.query;
+        let filter = {};
+
+        if (req.user.role === 'gestor') {
+            filter = { managerId: req.user._id };
+        }
+
+        const activities = await Activity.find(filter)
+            .populate('actorId', 'name')
+            .sort({ createdAt: -1 })
+            .limit(parseInt(limit));
+
+        res.json({ ok: true, data: { activities } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\routes\tasks.js
+================================================================================
+
+const router = require('express').Router();
+const Task = require('../models/Task');
+const Provider = require('../models/Provider');
+const { auth } = require('../middleware/auth');
+const { logActivity, scopeFilter } = require('../helpers');
+
+router.use(auth);
+
+// GET /api/tasks
+router.get('/', async (req, res, next) => {
+    try {
+        const { status, providerId, managerId, q, from, to, overdue, archived, page = 1, limit = 50 } = req.query;
+        const filter = { ...scopeFilter(req.user) };
+
+        // Default: only non-archived tasks. If archived='true', show only archived.
+        if (archived === 'true') {
+            filter.archived = true;
+        } else {
+            filter.archived = false;
+        }
+
+        if (status) filter.status = status;
+        if (providerId) filter.providerId = providerId;
+        if (managerId && req.user.role === 'admin') filter.managerId = managerId;
+        if (q) {
+            filter.$or = [
+                { title: { $regex: q, $options: 'i' } },
+                { description: { $regex: q, $options: 'i' } }
+            ];
+        }
+        if (from || to) {
+            filter.dueDate = {};
+            if (from) filter.dueDate.$gte = new Date(from);
+            if (to) filter.dueDate.$lte = new Date(to);
+        }
+        if (overdue === 'true') {
+            filter.dueDate = { ...(filter.dueDate || {}), $lt: new Date() };
+            filter.status = { $nin: ['concluido'] };
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const [tasks, total] = await Promise.all([
+            Task.find(filter)
+                .populate('providerId', 'name cnpj')
+                .populate('managerId', 'name email')
+                .populate('createdBy', 'name')
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit)),
+            Task.countDocuments(filter)
+        ]);
+
+        res.json({ ok: true, data: { tasks, total, page: parseInt(page), limit: parseInt(limit) } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/tasks
+router.post('/', async (req, res, next) => {
+    try {
+        const { title, description, priority, dueDate, status, providerId, managerId } = req.body;
+        if (!title) {
+            return res.status(400).json({ ok: false, error: 'Título é obrigatório' });
+        }
+
+        const data = {
+            title,
+            description,
+            priority: priority || 'media',
+            dueDate: dueDate || null,
+            status: status || 'backlog',
+            providerId: providerId || null,
+            createdBy: req.user._id,
+            updatedBy: req.user._id
+        };
+
+        // Set managerId based on role
+        if (req.user.role === 'admin') {
+            data.managerId = managerId || req.user._id;
+        } else {
+            data.managerId = req.user._id;
+        }
+
+        // Validate provider belongs to manager scope
+        if (data.providerId && req.user.role === 'gestor') {
+            const provider = await Provider.findOne({ _id: data.providerId, managerId: req.user._id });
+            if (!provider) {
+                return res.status(403).json({ ok: false, error: 'Prestador não pertence ao seu escopo' });
+            }
+        }
+
+        const task = await Task.create(data);
+        const populated = await Task.findById(task._id)
+            .populate('providerId', 'name cnpj')
+            .populate('managerId', 'name email');
+
+        await logActivity({
+            action: 'TASK_CREATED',
+            message: `Tarefa "${title}" criada`,
+            entityType: 'task',
+            entityId: task._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.status(201).json({ ok: true, data: { task: populated } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/tasks/:id
+router.get('/:id', async (req, res, next) => {
+    try {
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const task = await Task.findOne(filter)
+            .populate('providerId', 'name cnpj')
+            .populate('managerId', 'name email')
+            .populate('createdBy', 'name');
+        if (!task) return res.status(404).json({ ok: false, error: 'Tarefa não encontrada' });
+        res.json({ ok: true, data: { task } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// PATCH /api/tasks/:id
+router.patch('/:id', async (req, res, next) => {
+    try {
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const task = await Task.findOne(filter);
+        if (!task) return res.status(404).json({ ok: false, error: 'Tarefa não encontrada' });
+
+        const { title, description, priority, dueDate, status, providerId, managerId, checklists } = req.body;
+        if (title) task.title = title;
+        if (description !== undefined) task.description = description;
+        if (priority) task.priority = priority;
+        if (dueDate !== undefined) task.dueDate = dueDate;
+        if (status) task.status = status;
+        if (checklists !== undefined) task.checklists = checklists;
+        if (providerId !== undefined) {
+            if (providerId && req.user.role === 'gestor') {
+                const provider = await Provider.findOne({ _id: providerId, managerId: req.user._id });
+                if (!provider) {
+                    return res.status(403).json({ ok: false, error: 'Prestador não pertence ao seu escopo' });
+                }
+            }
+            task.providerId = providerId || null;
+        }
+        if (req.user.role === 'admin' && managerId) task.managerId = managerId;
+        task.updatedBy = req.user._id;
+        await task.save();
+
+        const populated = await Task.findById(task._id)
+            .populate('providerId', 'name cnpj')
+            .populate('managerId', 'name email');
+
+        await logActivity({
+            action: 'TASK_UPDATED',
+            message: `Tarefa "${task.title}" atualizada`,
+            entityType: 'task',
+            entityId: task._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { task: populated } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// DELETE /api/tasks/:id
+router.delete('/:id', async (req, res, next) => {
+    try {
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const task = await Task.findOne(filter);
+        if (!task) return res.status(404).json({ ok: false, error: 'Tarefa não encontrada' });
+
+        await Task.findByIdAndDelete(req.params.id);
+
+        await logActivity({
+            action: 'TASK_DELETED',
+            message: `Tarefa "${task.title}" removida`,
+            entityType: 'task',
+            entityId: task._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { message: 'Tarefa removida' } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/tasks/:id/move
+router.post('/:id/move', async (req, res, next) => {
+    try {
+        const { status } = req.body;
+        const validStatuses = ['pendente', 'backlog', 'todo', 'em-andamento', 'revisao', 'concluido'];
+        if (!status || !validStatuses.includes(status)) {
+            return res.status(400).json({ ok: false, error: 'Status inválido' });
+        }
+
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const task = await Task.findOne(filter);
+        if (!task) return res.status(404).json({ ok: false, error: 'Tarefa não encontrada' });
+
+        const oldStatus = task.status;
+        task.status = status;
+        task.updatedBy = req.user._id;
+        await task.save();
+
+        await logActivity({
+            action: 'TASK_MOVED',
+            message: `Tarefa "${task.title}" movida de "${oldStatus}" para "${status}"`,
+            entityType: 'task',
+            entityId: task._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        const populated = await Task.findById(task._id)
+            .populate('providerId', 'name cnpj')
+            .populate('managerId', 'name email');
+
+        res.json({ ok: true, data: { task: populated } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/tasks/:id/allocate
+router.post('/:id/allocate', async (req, res, next) => {
+    try {
+        const { providerId, status } = req.body;
+        if (!providerId) {
+            return res.status(400).json({ ok: false, error: 'providerId é obrigatório' });
+        }
+
+        const filter = { _id: req.params.id, ...scopeFilter(req.user) };
+        const task = await Task.findOne(filter);
+        if (!task) return res.status(404).json({ ok: false, error: 'Tarefa não encontrada' });
+
+        // Validate provider belongs to manager scope
+        const provFilter = { _id: providerId };
+        if (req.user.role === 'gestor') provFilter.managerId = req.user._id;
+        const provider = await Provider.findOne(provFilter);
+        if (!provider) {
+            return res.status(403).json({ ok: false, error: 'Prestador não pertence ao seu escopo' });
+        }
+
+        task.providerId = providerId;
+        task.status = status || 'backlog';
+        task.updatedBy = req.user._id;
+        await task.save();
+
+        await logActivity({
+            action: 'TASK_ALLOCATED',
+            message: `Tarefa "${task.title}" alocada para "${provider.name}"`,
+            entityType: 'task',
+            entityId: task._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        const populated = await Task.findById(task._id)
+            .populate('providerId', 'name cnpj')
+            .populate('managerId', 'name email');
+
+        res.json({ ok: true, data: { task: populated } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/tasks/archive (Bulk archive completed tasks)
+router.post('/archive', async (req, res, next) => {
+    try {
+        const baseFilter = { ...scopeFilter(req.user) };
+        const filter = {
+            ...baseFilter,
+            status: 'concluido',
+            archived: false
+        };
+
+        const result = await Task.updateMany(filter, {
+            $set: { archived: true, updatedBy: req.user._id }
+        });
+
+        await logActivity({
+            action: 'TASKS_ARCHIVED',
+            message: `${result.modifiedCount} tarefas concluídas foram arquivadas`,
+            entityType: 'task',
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { archivedCount: result.modifiedCount } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\routes\users.js
+================================================================================
+
+const router = require('express').Router();
+const User = require('../models/User');
+const { auth, requireRole } = require('../middleware/auth');
+const { logActivity } = require('../helpers');
+
+// All user routes require admin
+router.use(auth, requireRole('admin'));
+
+// GET /api/users
+router.get('/', async (req, res, next) => {
+    try {
+        const { role, status, q, page = 1, limit = 50 } = req.query;
+        const filter = {};
+        if (role) filter.role = role;
+        if (status) filter.status = status;
+        if (q) {
+            filter.$or = [
+                { name: { $regex: q, $options: 'i' } },
+                { email: { $regex: q, $options: 'i' } }
+            ];
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const [users, total] = await Promise.all([
+            User.find(filter).select('-passwordHash').sort({ name: 1 }).skip(skip).limit(parseInt(limit)),
+            User.countDocuments(filter)
+        ]);
+
+        res.json({ ok: true, data: { users, total, page: parseInt(page), limit: parseInt(limit) } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/users
+router.post('/', async (req, res, next) => {
+    try {
+        const { name, email, phone, role, status, password } = req.body;
+        if (!name || !email || !password) {
+            return res.status(400).json({ ok: false, error: 'Nome, email e senha são obrigatórios' });
+        }
+        if (!['admin', 'gestor'].includes(role)) {
+            return res.status(400).json({ ok: false, error: 'Role deve ser admin ou gestor' });
+        }
+
+        const user = new User({ name, email, phone, role, status, passwordHash: password });
+        await user.save();
+
+        await logActivity({
+            action: 'USER_CREATED',
+            message: `Usuário "${name}" (${role}) criado`,
+            entityType: 'user',
+            entityId: user._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.status(201).json({ ok: true, data: { user: user.toSafe() } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// PATCH /api/users/:id
+router.patch('/:id', async (req, res, next) => {
+    try {
+        const { name, email, phone, role, status } = req.body;
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ ok: false, error: 'Usuário não encontrado' });
+
+        if (name) user.name = name;
+        if (email) user.email = email;
+        if (phone !== undefined) user.phone = phone;
+        if (role) user.role = role;
+        if (status) user.status = status;
+        await user.save();
+
+        await logActivity({
+            action: 'USER_UPDATED',
+            message: `Usuário "${user.name}" atualizado`,
+            entityType: 'user',
+            entityId: user._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { user: user.toSafe() } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// DELETE /api/users/:id
+router.delete('/:id', async (req, res, next) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ ok: false, error: 'Usuário não encontrado' });
+
+        await User.findByIdAndDelete(req.params.id);
+
+        await logActivity({
+            action: 'USER_DELETED',
+            message: `Usuário "${user.name}" removido`,
+            entityType: 'user',
+            entityId: user._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { message: 'Usuário removido' } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// PATCH /api/users/:id/reset-password
+router.patch('/:id/reset-password', async (req, res, next) => {
+    try {
+        const { newPassword } = req.body;
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ ok: false, error: 'Senha deve ter no mínimo 6 caracteres' });
+        }
+
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ ok: false, error: 'Usuário não encontrado' });
+
+        user.passwordHash = newPassword;
+        await user.save();
+
+        await logActivity({
+            action: 'USER_PASSWORD_RESET',
+            message: `Senha do usuário "${user.name}" redefinida`,
+            entityType: 'user',
+            entityId: user._id,
+            actorId: req.user._id,
+            actorRole: req.user.role
+        });
+
+        res.json({ ok: true, data: { message: 'Senha redefinida com sucesso' } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+module.exports = router;
+
+
+================================================================================
+Arquivo: backend\src\seed.js
+================================================================================
+
+require('dotenv').config();
+const mongoose = require('mongoose');
+const User = require('./models/User');
+
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/gestao-pj';
+
+async function seed() {
+    try {
+        await mongoose.connect(MONGO_URI);
+        console.log('✅ Conectado ao MongoDB');
+
+        const existing = await User.findOne({ email: 'admin@gestaopj.com' });
+        if (existing) {
+            console.log('ℹ️  Usuário admin já existe:', existing.email);
+        } else {
+            const admin = new User({
+                name: 'Administrador',
+                email: 'admin@gestaopj.com',
+                phone: '',
+                role: 'admin',
+                status: 'ativo',
+                passwordHash: 'Admin@123'
+            });
+            await admin.save();
+            console.log('✅ Usuário admin criado:');
+            console.log('   Email: admin@gestaopj.com');
+            console.log('   Senha: Admin@123');
+        }
+
+        await mongoose.disconnect();
+        console.log('✅ Seed concluído');
+        process.exit(0);
+    } catch (err) {
+        console.error('❌ Erro no seed:', err.message);
+        process.exit(1);
+    }
+}
+
+seed();
+
+
+================================================================================
+Arquivo: frontend\eslint.config.js
+================================================================================
+
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{js,jsx}'],
+    extends: [
+      js.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+      parserOptions: {
+        ecmaVersion: 'latest',
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+    },
+  },
+])
+
+
+================================================================================
+Arquivo: frontend\index.html
+================================================================================
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Gestão PJ - Sistema de Gestão de Prestadores PJ com controle de tarefas, Kanban e relatórios" />
+    <title>Gestão PJ - Sistema de Gestão de Prestadores</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+
+================================================================================
+Arquivo: frontend\package.json
+================================================================================
+
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@hello-pangea/dnd": "^18.0.1",
+    "axios": "^1.13.6",
+    "lucide-react": "^0.575.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.13.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "vite": "^7.3.1"
+  }
+}
+
+
+================================================================================
+Arquivo: frontend\src\App.jsx
+================================================================================
+
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './contexts/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
+import Layout from './components/Layout';
+
+import Dashboard from './pages/Dashboard';
+import Prestadores from './pages/Prestadores';
+import TodoGeral from './pages/TodoGeral';
+import Kanban from './pages/Kanban';
+import Relatorios from './pages/Relatorios';
+import Gestores from './pages/Gestores';
+import Auditoria from './pages/Auditoria';
+
+function AppRoutes() {
+  return (
+    <Routes>
+
+      <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <Layout><TodoGeral /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/prestadores"
+        element={
+          <ProtectedRoute>
+            <Layout><Prestadores /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/dashboard"
+        element={
+          <ProtectedRoute>
+            <Layout><Dashboard /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/kanban"
+        element={
+          <ProtectedRoute>
+            <Layout><Kanban /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/relatorios"
+        element={
+          <ProtectedRoute>
+            <Layout><Relatorios /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/gestores"
+        element={
+          <ProtectedRoute adminOnly>
+            <Layout><Gestores /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/auditoria"
+        element={
+          <ProtectedRoute>
+            <Layout><Auditoria /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}
+
+
+================================================================================
+Arquivo: frontend\src\components\Layout.jsx
+================================================================================
+
+import { NavLink, useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import {
+    LayoutDashboard,
+    Users,
+    ListTodo,
+    Columns3,
+    BarChart3,
+    UserCog,
+    LogOut,
+    Briefcase,
+    FileSearch
+} from 'lucide-react';
+
+export default function Layout({ children }) {
+    const { user, logout, isAdmin } = useAuth();
+    const navigate = useNavigate();
+
+    const navItems = [
+        { to: '/', icon: ListTodo, label: 'To-Do Geral' },
+        { to: '/kanban', icon: Columns3, label: 'Kanban' },
+        { to: '/prestadores', icon: Briefcase, label: 'Contratantes' },
+        { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+        { to: '/relatorios', icon: BarChart3, label: 'Relatórios' },
+        { to: '/auditoria', icon: FileSearch, label: 'Auditoria' },
+    ];
+
+    if (isAdmin) {
+        navItems.push({ to: '/gestores', icon: UserCog, label: 'Gestores' });
+    }
+
+    return (
+        <div className="app-layout">
+            <aside className="sidebar">
+                <div className="sidebar-header">
+                    <div className="sidebar-logo">
+                        <Briefcase size={28} />
+                        <span>Gestão PJ</span>
+                    </div>
+                </div>
+
+                <nav className="sidebar-nav">
+                    {navItems.map((item) => (
+                        <NavLink
+                            key={item.to}
+                            to={item.to}
+                            end={item.to === '/'}
+                            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                        >
+                            <item.icon size={20} />
+                            <span>{item.label}</span>
+                        </NavLink>
+                    ))}
+                </nav>
+
+                <div className="sidebar-footer">
+                    <div className="user-info">
+                        <div className="user-avatar">{user?.name?.charAt(0)?.toUpperCase()}</div>
+                        <div className="user-details">
+                            <span className="user-name">{user?.name}</span>
+                            <span className="user-role">{user?.role === 'admin' ? 'Administrador' : 'Gestor'}</span>
+                        </div>
+                    </div>
+                    <button className="nav-item logout-btn" onClick={logout}>
+                        <LogOut size={20} />
+                        <span>Sair</span>
+                    </button>
+                </div>
+            </aside>
+
+            <main className="main-content">
+                {children}
+            </main>
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\components\ProtectedRoute.jsx
+================================================================================
+
+import { Navigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+
+export default function ProtectedRoute({ children, adminOnly = false }) {
+    const { user, loading } = useAuth();
+
+    if (loading) {
+        return (
+            <div className="loading-screen">
+                <div className="spinner"></div>
+                <p>Carregando...</p>
+            </div>
+        );
+    }
+
+    if (!user) return <Navigate to="/login" replace />;
+    if (adminOnly && user.role !== 'admin') return <Navigate to="/" replace />;
+
+    return children;
+}
+
+
+================================================================================
+Arquivo: frontend\src\components\TaskModal.css
+================================================================================
+
+.task-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.6);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    z-index: 1000;
+    padding: 48px 16px;
+    overflow-y: auto;
+}
+
+.task-modal-content {
+    background-color: #f4f5f7;
+    width: 100%;
+    max-width: 768px;
+    border-radius: 8px;
+    padding: 24px;
+    position: relative;
+    color: #172b4d;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    box-shadow: 0 8px 16px -4px rgba(9, 30, 66, 0.25), 0 0 0 1px rgba(9, 30, 66, 0.08);
+}
+
+.task-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+
+.task-modal-title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.task-modal-title-row h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 24px;
+    color: #172b4d;
+}
+
+.task-modal-icon {
+    color: #42526e;
+    margin-top: 2px;
+}
+
+.task-modal-meta {
+    margin-left: 36px;
+    font-size: 14px;
+    color: #5e6c84;
+    margin-bottom: 24px;
+}
+
+.task-modal-body {
+    display: flex;
+    gap: 24px;
+}
+
+.task-modal-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+.task-modal-sidebar {
+    width: 168px;
+    flex-shrink: 0;
+}
+
+/* Sections */
+.task-section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    color: #172b4d;
+}
+
+.task-section-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+/* Description */
+.desc-display {
+    margin-left: 36px;
+    cursor: pointer;
+    min-height: 48px;
+    padding: 8px 12px;
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.desc-display:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+.desc-display.empty {
+    background-color: rgba(9, 30, 66, 0.04);
+    color: #172b4d;
+}
+
+.desc-display.empty:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+.desc-edit-container {
+    margin-left: 36px;
+}
+
+.desc-edit-container textarea {
+    width: 100%;
+    min-height: 108px;
+    padding: 8px 12px;
+    border: 2px solid #4c9aff;
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 20px;
+    resize: vertical;
+    outline: none;
+    background-color: #fff;
+    margin-bottom: 8px;
+    font-family: inherit;
+}
+
+.desc-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* Checklist */
+.checklist-header {
+    justify-content: space-between;
+}
+
+.checklist-title-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.checklist-progress-container {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: 36px;
+    margin-bottom: 16px;
+}
+
+.progress-text {
+    font-size: 11px;
+    color: #5e6c84;
+    width: 32px;
+    text-align: right;
+}
+
+.progress-bar-bg {
+    flex: 1;
+    height: 8px;
+    background-color: rgba(9, 30, 66, 0.08);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background-color: #5ba4cf;
+    transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.progress-bar-fill.complete {
+    background-color: #61bd4f;
+}
+
+.checklist-items {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-left: 36px;
+    margin-bottom: 12px;
+}
+
+.checklist-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 6px;
+    border-radius: 3px;
+    position: relative;
+}
+
+.checklist-item:hover {
+    background-color: rgba(9, 30, 66, 0.04);
+}
+
+.checklist-item input[type="checkbox"] {
+    margin-top: 4px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.item-text {
+    flex: 1;
+    font-size: 14px;
+    line-height: 20px;
+    color: #172b4d;
+    word-break: break-word;
+}
+
+.item-text.completed {
+    text-decoration: line-through;
+    color: #5e6c84;
+}
+
+.item-delete {
+    opacity: 0;
+    transition: opacity 0.2s;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: #5e6c84;
+    padding: 4px;
+    border-radius: 3px;
+}
+
+.item-delete:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+    color: #172b4d;
+}
+
+.checklist-item:hover .item-delete {
+    opacity: 1;
+}
+
+.checklist-actions {
+    margin-left: 36px;
+}
+
+/* Sidebar */
+.sidebar-module h4 {
+    font-size: 12px;
+    font-weight: 600;
+    color: #5e6c84;
+    margin: 0 0 8px 0;
+    text-transform: uppercase;
+}
+
+.btn-sidebar {
+    width: 100%;
+    text-align: left;
+    background-color: rgba(9, 30, 66, 0.04);
+    border: none;
+    border-radius: 3px;
+    padding: 6px 12px;
+    color: #172b4d;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    transition: background-color 0.2s;
+}
+
+.btn-sidebar:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+/* Button overrides for modal context */
+.task-modal-content .btn-secondary {
+    background-color: rgba(9, 30, 66, 0.04);
+    color: #172b4d;
+    border: none;
+}
+
+.task-modal-content .btn-secondary:hover {
+    background-color: rgba(9, 30, 66, 0.08);
+}
+
+================================================================================
+Arquivo: frontend\src\components\TaskModal.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { X, CheckSquare, Plus, Trash2, AlignLeft, Calendar, Flag, User } from 'lucide-react';
+import './TaskModal.css';
+
+export default function TaskModal({ task, onClose, onUpdate }) {
+    const [localTask, setLocalTask] = useState({ ...task });
+    const [isEditingDesc, setIsEditingDesc] = useState(false);
+    const [descInput, setDescInput] = useState(task.description || '');
+    const [saving, setSaving] = useState(false);
+
+    // Initial load
+    useEffect(() => {
+        if (!localTask.checklists) {
+            setLocalTask(prev => ({ ...prev, checklists: [] }));
+        }
+    }, []);
+
+    const saveChanges = async (updates) => {
+        setSaving(true);
+        try {
+            const res = await api.patch(`/tasks/${localTask._id}`, updates);
+            setLocalTask(res.data.data.task);
+            if (onUpdate) onUpdate(res.data.data.task);
+        } catch (err) {
+            console.error('Failed to update task:', err);
+            alert('Erro ao salvar alterações');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleSaveDescription = () => {
+        setIsEditingDesc(false);
+        if (descInput !== localTask.description) {
+            saveChanges({ description: descInput });
+        }
+    };
+
+    const handleAddChecklist = () => {
+        const title = prompt('Nome do novo checklist:');
+        if (!title) return;
+
+        const newChecklists = [...(localTask.checklists || []), { title, items: [] }];
+        saveChanges({ checklists: newChecklists });
+    };
+
+    const handleDeleteChecklist = (checklistIndex) => {
+        if (!window.confirm('Excluir este checklist?')) return;
+        const newChecklists = [...localTask.checklists];
+        newChecklists.splice(checklistIndex, 1);
+        saveChanges({ checklists: newChecklists });
+    };
+
+    const handleAddItem = (checklistIndex) => {
+        const text = prompt('Nome do item:');
+        if (!text) return;
+
+        const newChecklists = [...localTask.checklists];
+        newChecklists[checklistIndex].items.push({ text, isCompleted: false });
+        saveChanges({ checklists: newChecklists });
+    };
+
+    const handleToggleItem = (checklistIndex, itemIndex) => {
+        const newChecklists = [...localTask.checklists];
+        const item = newChecklists[checklistIndex].items[itemIndex];
+        item.isCompleted = !item.isCompleted;
+        saveChanges({ checklists: newChecklists });
+    };
+
+    const handleDeleteItem = (checklistIndex, itemIndex) => {
+        const newChecklists = [...localTask.checklists];
+        newChecklists[checklistIndex].items.splice(itemIndex, 1);
+        saveChanges({ checklists: newChecklists });
+    };
+
+    const calculateProgress = (items) => {
+        if (!items || items.length === 0) return 0;
+        const completed = items.filter(i => i.isCompleted).length;
+        return Math.round((completed / items.length) * 100);
+    };
+
+    return (
+        <div className="task-modal-overlay" onClick={onClose}>
+            <div className="task-modal-content" onClick={e => e.stopPropagation()}>
+                <div className="task-modal-header">
+                    <div className="task-modal-title-row">
+                        <CheckSquare size={24} className="task-modal-icon" />
+                        <h2>{localTask.title}</h2>
+                    </div>
+                    <button className="btn-icon" onClick={onClose}><X size={24} /></button>
+                </div>
+
+                <div className="task-modal-meta">
+                    Na lista <strong>{localTask.status}</strong>
+                </div>
+
+                <div className="task-modal-body">
+                    <div className="task-modal-main">
+
+                        {/* Description Section */}
+                        <div className="task-section">
+                            <div className="task-section-header">
+                                <AlignLeft size={20} />
+                                <h3>Descrição</h3>
+                            </div>
+                            {isEditingDesc ? (
+                                <div className="desc-edit-container">
+                                    <textarea
+                                        autoFocus
+                                        value={descInput}
+                                        onChange={e => setDescInput(e.target.value)}
+                                        placeholder="Adicione uma descrição mais detalhada..."
+                                    />
+                                    <div className="desc-actions">
+                                        <button className="btn btn-primary btn-sm" onClick={handleSaveDescription} disabled={saving}>Salvar</button>
+                                        <button className="btn btn-secondary btn-sm" onClick={() => { setIsEditingDesc(false); setDescInput(localTask.description || ''); }}>Cancelar</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div
+                                    className={`desc-display ${!localTask.description ? 'empty' : ''}`}
+                                    onClick={() => setIsEditingDesc(true)}
+                                >
+                                    {localTask.description || 'Adicione uma descrição mais detalhada...'}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Checklists Section */}
+                        {localTask.checklists && localTask.checklists.map((checklist, cIdx) => {
+                            const progress = calculateProgress(checklist.items);
+                            return (
+                                <div key={cIdx} className="task-section checklist-section">
+                                    <div className="task-section-header checklist-header">
+                                        <div className="checklist-title-wrapper">
+                                            <CheckSquare size={20} />
+                                            <h3>{checklist.title}</h3>
+                                        </div>
+                                        <button className="btn btn-secondary btn-sm" onClick={() => handleDeleteChecklist(cIdx)}>Excluir</button>
+                                    </div>
+
+                                    <div className="checklist-progress-container">
+                                        <span className="progress-text">{progress}%</span>
+                                        <div className="progress-bar-bg">
+                                            <div
+                                                className={`progress-bar-fill ${progress === 100 ? 'complete' : ''}`}
+                                                style={{ width: `${progress}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+
+                                    <div className="checklist-items">
+                                        {checklist.items && checklist.items.map((item, iIdx) => (
+                                            <div key={iIdx} className="checklist-item">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={item.isCompleted}
+                                                    onChange={() => handleToggleItem(cIdx, iIdx)}
+                                                />
+                                                <span className={`item-text ${item.isCompleted ? 'completed' : ''}`}>
+                                                    {item.text}
+                                                </span>
+                                                <button className="btn-icon-sm item-delete" onClick={() => handleDeleteItem(cIdx, iIdx)}>
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="checklist-actions">
+                                        <button className="btn btn-secondary btn-sm" onClick={() => handleAddItem(cIdx)}>
+                                            Adicionar um item
+                                        </button>
+                                    </div>
+                                </div>
+                            )
+                        })}
+
+                    </div>
+
+                    {/* Sidebar actions */}
+                    <div className="task-modal-sidebar">
+                        <div className="sidebar-module">
+                            <h4>Adicionar ao cartão</h4>
+                            <button className="btn-sidebar" onClick={handleAddChecklist}>
+                                <CheckSquare size={16} /> Checklist
+                            </button>
+                            <button className="btn-sidebar">
+                                <Flag size={16} /> Etiquetas
+                            </button>
+                            <button className="btn-sidebar">
+                                <Calendar size={16} /> Datas
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\contexts\AuthContext.jsx
+================================================================================
+
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import api from '../services/api';
+
+const AuthContext = createContext(null);
+
+const defaultUser = { _id: '000000000000000000000000', name: 'Admin Bypassed', role: 'admin', email: 'admin@local' };
+
+export function AuthProvider({ children }) {
+    const [user, setUser] = useState(defaultUser);
+    const [loading, setLoading] = useState(false);
+
+    const loadUser = useCallback(async () => {
+        try {
+            const res = await api.get('/auth/me');
+            setUser(res.data.data.user);
+        } catch {
+            setUser(defaultUser);
+        }
+    }, []);
+
+    useEffect(() => {
+        loadUser();
+    }, [loadUser]);
+
+    const login = async () => { return user; };
+    const logout = () => { };
+    const isAdmin = true;
+
+    return (
+        <AuthContext.Provider value={{ user, loading, login, logout, isAdmin, loadUser }}>
+            {children}
+        </AuthContext.Provider>
+    );
+}
+
+export function useAuth() {
+    const ctx = useContext(AuthContext);
+    if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+    return ctx;
+}
+
+
+================================================================================
+Arquivo: frontend\src\index.css
+================================================================================
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+/* ===== CSS Variables ===== */
+:root {
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* Dark Sidebar */
+  --sidebar-bg: #0f172a;
+  --sidebar-hover: #1e293b;
+  --sidebar-active: #334155;
+  --sidebar-text: #94a3b8;
+  --sidebar-text-active: #f1f5f9;
+  --sidebar-width: 260px;
+
+  /* Main Background */
+  --bg-primary: #f1f5f9;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8fafc;
+
+  /* Text */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+
+  /* Borders */
+  --border: #e2e8f0;
+  --border-light: #f1f5f9;
+
+  /* Accent Colors */
+  --blue: #3b82f6;
+  --blue-light: #eff6ff;
+  --blue-dark: #1d4ed8;
+  --purple: #8b5cf6;
+  --purple-light: #f5f3ff;
+  --green: #10b981;
+  --green-light: #ecfdf5;
+  --yellow: #f59e0b;
+  --yellow-light: #fffbeb;
+  --red: #ef4444;
+  --red-light: #fef2f2;
+  --orange: #f97316;
+  --orange-light: #fff7ed;
+  --gray: #64748b;
+  --gray-light: #f1f5f9;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* Transitions */
+  --transition: 0.2s ease;
+}
+
+/* ===== Reset ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 14px;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ===== Layout ===== */
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  background: var(--sidebar-bg);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 100;
+}
+
+.sidebar-header {
+  padding: 24px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #f1f5f9;
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.sidebar-logo svg {
+  color: var(--blue);
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  color: var(--sidebar-text);
+  text-decoration: none;
+  font-size: 0.93rem;
+  font-weight: 500;
+  transition: all var(--transition);
+  cursor: pointer;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.nav-item:hover {
+  background: var(--sidebar-hover);
+  color: var(--sidebar-text-active);
+}
+
+.nav-item.active {
+  background: var(--blue);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+}
+
+.sidebar-footer {
+  padding: 16px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+}
+
+.user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.user-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.user-name {
+  color: var(--sidebar-text-active);
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.user-role {
+  color: var(--sidebar-text);
+  font-size: 0.75rem;
+  text-transform: capitalize;
+}
+
+.logout-btn {
+  color: var(--red) !important;
+}
+
+.logout-btn:hover {
+  background: rgba(239, 68, 68, 0.15) !important;
+}
+
+/* ===== Main Content ===== */
+.main-content {
+  flex: 1;
+  margin-left: var(--sidebar-width);
+  height: 100vh;
+  overflow-y: auto;
+  padding: 28px 32px;
+  background: var(--bg-primary);
+}
+
+/* ===== Pages ===== */
+.page {
+  max-width: 1400px;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 28px;
+}
+
+.page-header h1 {
+  font-size: 1.7rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+}
+
+.page-header p {
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  margin-top: 2px;
+}
+
+/* ===== Loading ===== */
+.loading-screen,
+.page-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 16px;
+  color: var(--text-secondary);
+}
+
+.page-loading {
+  height: 60vh;
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ===== Login Page ===== */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  padding: 20px;
+}
+
+.login-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  padding: 48px 40px;
+  width: 100%;
+  max-width: 420px;
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 36px;
+}
+
+.login-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 20px;
+}
+
+.login-header h1 {
+  font-size: 1.6rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.login-header p {
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  margin-top: 4px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ===== Buttons ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all var(--transition);
+  border: none;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--blue);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(59, 130, 246, 0.3);
+}
+
+.btn-primary:hover {
+  background: var(--blue-dark);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: var(--border);
+}
+
+.btn-accent {
+  background: var(--purple);
+  color: #fff;
+}
+
+.btn-accent:hover {
+  background: #7c3aed;
+}
+
+.btn-sm {
+  padding: 6px 14px;
+  font-size: 0.82rem;
+}
+
+.btn-block {
+  width: 100%;
+  padding: 12px;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.btn-icon:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.btn-icon-danger:hover {
+  background: var(--red-light);
+  color: var(--red);
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* ===== Forms ===== */
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.form-group label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  padding: 10px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 0.92rem;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  transition: all var(--transition);
+  outline: none;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.form-group textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.password-input {
+  position: relative;
+}
+
+.password-input input {
+  width: 100%;
+  padding-right: 42px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+}
+
+/* ===== Alerts ===== */
+.alert {
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.alert-error {
+  background: var(--red-light);
+  color: var(--red);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+/* ===== Pagination ===== */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 24px;
+  padding-bottom: 24px;
+}
+
+.pagination-info {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* ===== Search ===== */
+.search-container {
+  display: flex;
+  align-items: center;
+  transition: all 0.3s ease;
+}
+
+.btn-search-trigger {
+  color: var(--text-muted);
+  padding: 8px;
+  border-radius: 50%;
+  transition: all var(--transition);
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-search-trigger:hover {
+  background: var(--bg-primary);
+  color: var(--blue);
+}
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-md);
+  width: 300px;
+  transition: all var(--transition);
+  /* Added transition for consistency */
+}
+
+.search-bar:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.search-bar svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.search-bar input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-family: var(--font);
+  font-size: 0.92rem;
+  color: var(--text-primary);
+  background: transparent;
+}
+
+/* ===== Toolbar ===== */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.toolbar .search-bar {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.filter-tabs {
+  display: flex;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.tab {
+  padding: 10px 18px;
+  border: none;
+  background: transparent;
+  font-family: var(--font);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.tab:hover {
+  background: var(--bg-primary);
+}
+
+.tab.active {
+  background: var(--blue);
+  color: #fff;
+}
+
+/* ===== Quick Add Bar ===== */
+.quick-add-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  background: var(--bg-card);
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 20px;
+  transition: all var(--transition);
+}
+
+.quick-add-bar:focus-within {
+  border-color: var(--blue);
+  border-style: solid;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  background: #fff;
+}
+
+.quick-add-icon {
+  color: var(--blue);
+  flex-shrink: 0;
+}
+
+.quick-add-bar input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-family: var(--font);
+  font-size: 1rem;
+  color: var(--text-primary);
+  background: transparent;
+  font-weight: 500;
+}
+
+.quick-add-bar input::placeholder {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.quick-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  border: none;
+  background: var(--blue);
+  color: #fff;
+  cursor: pointer;
+  transition: all var(--transition);
+  flex-shrink: 0;
+  animation: fadeIn 0.2s ease;
+}
+
+.quick-add-btn:hover {
+  background: var(--blue-dark);
+  transform: scale(1.05);
+}
+
+.quick-add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ===== Tables ===== */
+.table-container {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th {
+  padding: 14px 18px;
+  text-align: left;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table td {
+  padding: 14px 18px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tr:hover td {
+  background: var(--bg-card-hover);
+}
+
+.td-bold {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.empty-text {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 40px 20px;
+  font-size: 0.92rem;
+}
+
+/* ===== Badges ===== */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.badge-blue {
+  background: var(--blue-light);
+  color: var(--blue-dark);
+}
+
+.badge-green {
+  background: var(--green-light);
+  color: #059669;
+}
+
+.badge-yellow {
+  background: var(--yellow-light);
+  color: #b45309;
+}
+
+.badge-red {
+  background: var(--red-light);
+  color: var(--red);
+}
+
+.badge-purple {
+  background: var(--purple-light);
+  color: #7c3aed;
+}
+
+.badge-orange {
+  background: var(--orange-light);
+  color: #ea580c;
+}
+
+.badge-gray {
+  background: var(--gray-light);
+  color: var(--gray);
+}
+
+/* ===== Modals ===== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+  animation: fadeIn 0.2s ease;
+}
+
+.modal {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  width: 100%;
+  max-width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+  animation: slideUp 0.3s ease;
+}
+
+.modal-sm {
+  max-width: 420px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 28px 0;
+}
+
+.modal-header h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.modal-body {
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.modal-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== Dashboard Cards ===== */
+.dashboard-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+  margin-bottom: 32px;
+}
+
+.stat-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  padding: 22px 24px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+
+.stat-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+.stat-card-icon {
+  width: 50px;
+  height: 50px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.stat-card-blue .stat-card-icon {
+  background: var(--blue-light);
+  color: var(--blue);
+}
+
+.stat-card-yellow .stat-card-icon {
+  background: var(--yellow-light);
+  color: var(--yellow);
+}
+
+.stat-card-purple .stat-card-icon {
+  background: var(--purple-light);
+  color: var(--purple);
+}
+
+.stat-card-green .stat-card-icon {
+  background: var(--green-light);
+  color: var(--green);
+}
+
+.stat-card-red .stat-card-icon {
+  background: var(--red-light);
+  color: var(--red);
+}
+
+.stat-card-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-card-value {
+  font-size: 1.7rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.stat-card-label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+/* ===== Dashboard Section ===== */
+.dashboard-section,
+.report-section {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  padding: 24px 28px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.section-header h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.section-header svg {
+  color: var(--blue);
+}
+
+/* ===== Activities ===== */
+.activities-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.activity-item:last-child {
+  border-bottom: none;
+}
+
+.activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--blue);
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+
+.activity-message {
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.activity-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ===== Task Cards (To-Do) ===== */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.task-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+
+.task-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.task-card.overdue {
+  border-left: 3px solid var(--red);
+}
+
+.task-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.task-card-header h3 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.task-desc {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.task-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.task-due {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.overdue-text {
+  color: var(--red) !important;
+  font-weight: 600;
+}
+
+.task-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ===== Kanban ===== */
+.page-kanban {
+  max-width: 100%;
+}
+
+.kanban-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+}
+
+.kanban-filter svg {
+  color: var(--text-muted);
+}
+
+.kanban-filter select {
+  border: none;
+  outline: none;
+  font-family: var(--font);
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.kanban-board {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+  min-height: calc(100vh - 180px);
+}
+
+.kanban-column {
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 300px;
+}
+
+.kanban-column-header {
+  padding: 16px 16px 12px;
+  border-top: 3px solid var(--blue);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kanban-column-header h3 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.kanban-count {
+  background: var(--border);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.kanban-column-body {
+  flex: 1;
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 100px;
+  transition: background 0.2s ease;
+}
+
+.kanban-column-body.drag-over {
+  background: rgba(59, 130, 246, 0.05);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+.kanban-card {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+  cursor: grab;
+  transition: all var(--transition);
+  user-select: none;
+}
+
+.kanban-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--blue);
+}
+
+.kanban-card.dragging {
+  box-shadow: var(--shadow-lg);
+  transform: rotate(2deg);
+  opacity: 0.95;
+}
+
+.kanban-card.overdue {
+  border-left: 3px solid var(--red);
+}
+
+.kanban-card-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text-primary);
+}
+
+.task-created-at,
+.kanban-card-created {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-bottom: 8px;
+}
+
+.kanban-card-desc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.kanban-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.priority-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.kanban-card-provider {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.kanban-card-date {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* ===== Reports ===== */
+.distribution-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.distribution-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.distribution-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.distribution-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.distribution-count {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.distribution-bar-container {
+  height: 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.distribution-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s ease;
+  min-width: 2px;
+}
+
+.performance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.performance-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.performance-header {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-width: 200px;
+}
+
+.performance-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.performance-name small {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.performance-stats {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 120px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+  border-radius: 4px;
+  transition: width 0.6s ease;
+}
+
+.performance-pct {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  min-width: 40px;
+  text-align: right;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 1200px) {
+  .kanban-board {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    display: none;
+  }
+
+  .main-content {
+    margin-left: 0;
+  }
+
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .kanban-board {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+================================================================================
+Arquivo: frontend\src\main.jsx
+================================================================================
+
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+
+
+================================================================================
+Arquivo: frontend\src\pages\Auditoria.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { Search, Calendar, User, FileSearch, Archive } from 'lucide-react';
+
+export default function Auditoria() {
+    const [tasks, setTasks] = useState([]);
+    const [search, setSearch] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [page, setPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const limit = 50;
+
+    const loadArchivedTasks = async () => {
+        try {
+            const params = { page, limit, q: search, archived: 'true' };
+            const res = await api.get('/tasks', { params });
+            const { tasks: list, total } = res.data.data;
+            setTasks(list);
+            setTotalPages(Math.ceil(total / limit));
+        } catch (err) {
+            console.error(err);
+        }
+    };
+
+    useEffect(() => {
+        loadArchivedTasks().finally(() => setLoading(false));
+    }, [page]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setPage(1);
+            loadArchivedTasks();
+        }, 500);
+        return () => clearTimeout(timer);
+    }, [search]);
+
+    const formatDateTime = (d) => d ? new Date(d).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+
+    return (
+        <div className="page">
+            <div className="page-header">
+                <div>
+                    <h1>Auditoria de Tarefas</h1>
+                    <p>Consulta de histórico e tarefas arquivadas</p>
+                </div>
+                <div className="header-stats">
+                    <div className="badge badge-blue">Histórico Consolidado</div>
+                </div>
+            </div>
+
+            <div className="search-bar">
+                <Search size={18} />
+                <input
+                    type="text"
+                    placeholder="Pesquisar no arquivo (título ou descrição)..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                />
+            </div>
+
+            {loading ? (
+                <div className="page-loading"><div className="spinner"></div></div>
+            ) : (
+                <div className="archive-list">
+                    {tasks.length === 0 && <p className="empty-text">Nenhuma tarefa encontrada no arquivo.</p>}
+
+                    <div className="table-container">
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Tarefa</th>
+                                    <th>Status Final</th>
+                                    <th>Contratante</th>
+                                    <th>Concluída em</th>
+                                    <th>Arquivada em</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {tasks.map((t) => (
+                                    <tr key={t._id}>
+                                        <td>
+                                            <div className="task-info">
+                                                <strong>{t.title}</strong>
+                                                <small>{t.description?.substring(0, 50)}...</small>
+                                            </div>
+                                        </td>
+                                        <td><span className="badge badge-green">Concluída</span></td>
+                                        <td>{t.providerId?.name || '—'}</td>
+                                        <td>{formatDateTime(t.updatedAt)}</td>
+                                        <td>{formatDateTime(t.updatedAt)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {totalPages > 1 && (
+                        <div className="pagination">
+                            <button className="btn btn-sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>Anterior</button>
+                            <span className="pagination-info">Página {page} de {totalPages}</span>
+                            <button className="btn btn-sm" disabled={page === totalPages} onClick={() => setPage(p => p + 1)}>Próxima</button>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\Dashboard.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { Users, Clock, PlayCircle, CheckCircle2, AlertTriangle, Activity } from 'lucide-react';
+
+export default function Dashboard() {
+    const [summary, setSummary] = useState(null);
+    const [activities, setActivities] = useState([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        Promise.all([
+            api.get('/reports/summary'),
+            api.get('/activities?limit=10')
+        ]).then(([sumRes, actRes]) => {
+            setSummary(sumRes.data.data);
+            setActivities(actRes.data.data.activities);
+        }).catch(console.error)
+            .finally(() => setLoading(false));
+    }, []);
+
+    if (loading) return <div className="page-loading"><div className="spinner"></div></div>;
+
+    const cards = [
+        { label: 'Contratantes Ativos', value: summary?.totalProvidersAtivos || 0, icon: Users, color: 'blue' },
+        { label: 'Tarefas Pendentes', value: summary?.totalTasksPendentes || 0, icon: Clock, color: 'yellow' },
+        { label: 'Em Andamento', value: summary?.totalTasksEmAndamento || 0, icon: PlayCircle, color: 'purple' },
+        { label: 'Concluídas', value: summary?.totalTasksConcluidas || 0, icon: CheckCircle2, color: 'green' },
+        { label: 'Atrasadas', value: summary?.totalOverdue || 0, icon: AlertTriangle, color: 'red' },
+    ];
+
+    const formatDate = (d) => {
+        if (!d) return '';
+        return new Date(d).toLocaleDateString('pt-BR', {
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+        });
+    };
+
+    return (
+        <div className="page">
+            <div className="page-header">
+                <h1>Dashboard</h1>
+                <p>Visão geral do sistema</p>
+            </div>
+
+            <div className="dashboard-cards">
+                {cards.map((card) => (
+                    <div key={card.label} className={`stat-card stat-card-${card.color}`}>
+                        <div className="stat-card-icon">
+                            <card.icon size={24} />
+                        </div>
+                        <div className="stat-card-info">
+                            <span className="stat-card-value">{card.value}</span>
+                            <span className="stat-card-label">{card.label}</span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <div className="dashboard-section">
+                <div className="section-header">
+                    <Activity size={20} />
+                    <h2>Atividades Recentes</h2>
+                </div>
+                <div className="activities-list">
+                    {activities.length === 0 && <p className="empty-text">Nenhuma atividade registrada</p>}
+                    {activities.map((a) => (
+                        <div key={a._id} className="activity-item">
+                            <div className="activity-dot"></div>
+                            <div className="activity-content">
+                                <p className="activity-message">{a.message}</p>
+                                <span className="activity-meta">
+                                    {a.actorId?.name || 'Sistema'} · {formatDate(a.createdAt)}
+                                </span>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\Gestores.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { Plus, Search, Edit2, Trash2, X, KeyRound } from 'lucide-react';
+
+export default function Gestores() {
+    const [users, setUsers] = useState([]);
+    const [search, setSearch] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [modalOpen, setModalOpen] = useState(false);
+    const [editing, setEditing] = useState(null);
+    const [resetModal, setResetModal] = useState(null);
+    const [form, setForm] = useState({ name: '', email: '', phone: '', role: 'gestor', status: 'ativo', password: '' });
+    const [newPassword, setNewPassword] = useState('');
+
+    const loadUsers = async () => {
+        try {
+            const res = await api.get('/users', { params: { q: search, limit: 200 } });
+            setUsers(res.data.data.users);
+        } catch (err) { console.error(err); }
+    };
+
+    useEffect(() => {
+        loadUsers().finally(() => setLoading(false));
+    }, []);
+
+    useEffect(() => {
+        const timer = setTimeout(loadUsers, 300);
+        return () => clearTimeout(timer);
+    }, [search]);
+
+    const openModal = (user = null) => {
+        if (user) {
+            setEditing(user);
+            setForm({ name: user.name, email: user.email, phone: user.phone || '', role: user.role, status: user.status, password: '' });
+        } else {
+            setEditing(null);
+            setForm({ name: '', email: '', phone: '', role: 'gestor', status: 'ativo', password: '' });
+        }
+        setModalOpen(true);
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+            if (editing) {
+                const payload = { name: form.name, email: form.email, phone: form.phone, role: form.role, status: form.status };
+                await api.patch(`/users/${editing._id}`, payload);
+            } else {
+                await api.post('/users', form);
+            }
+            setModalOpen(false);
+            loadUsers();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao salvar');
+        }
+    };
+
+    const handleDelete = async (id) => {
+        if (!confirm('Deseja remover este usuário?')) return;
+        try {
+            await api.delete(`/users/${id}`);
+            loadUsers();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao remover');
+        }
+    };
+
+    const handleResetPassword = async (e) => {
+        e.preventDefault();
+        try {
+            await api.patch(`/users/${resetModal._id}/reset-password`, { newPassword });
+            setResetModal(null);
+            setNewPassword('');
+            alert('Senha redefinida com sucesso');
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao redefinir senha');
+        }
+    };
+
+    if (loading) return <div className="page-loading"><div className="spinner"></div></div>;
+
+    return (
+        <div className="page">
+            <div className="page-header">
+                <div>
+                    <h1>Gestores</h1>
+                    <p>Gerenciamento de usuários do sistema</p>
+                </div>
+                <button className="btn btn-primary" onClick={() => openModal()}>
+                    <Plus size={18} /> Novo Gestor
+                </button>
+            </div>
+
+            <div className="search-bar">
+                <Search size={18} />
+                <input placeholder="Buscar por nome ou email..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+
+            <div className="table-container">
+                <table className="data-table">
+                    <thead>
+                        <tr>
+                            <th>Nome</th>
+                            <th>Email</th>
+                            <th>Telefone</th>
+                            <th>Perfil</th>
+                            <th>Status</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {users.length === 0 && (
+                            <tr><td colSpan="6" className="empty-text">Nenhum usuário encontrado</td></tr>
+                        )}
+                        {users.map((u) => (
+                            <tr key={u._id}>
+                                <td className="td-bold">{u.name}</td>
+                                <td>{u.email}</td>
+                                <td>{u.phone || '—'}</td>
+                                <td>
+                                    <span className={`badge badge-${u.role === 'admin' ? 'purple' : 'blue'}`}>
+                                        {u.role === 'admin' ? 'Admin' : 'Gestor'}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span className={`badge badge-${u.status === 'ativo' ? 'green' : 'gray'}`}>
+                                        {u.status}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div className="actions">
+                                        <button className="btn-icon" onClick={() => openModal(u)} title="Editar"><Edit2 size={16} /></button>
+                                        <button className="btn-icon" onClick={() => { setResetModal(u); setNewPassword(''); }} title="Redefinir Senha"><KeyRound size={16} /></button>
+                                        <button className="btn-icon btn-icon-danger" onClick={() => handleDelete(u._id)} title="Remover"><Trash2 size={16} /></button>
+                                    </div>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* Create/Edit Modal */}
+            {modalOpen && (
+                <div className="modal-overlay" onClick={() => setModalOpen(false)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>{editing ? 'Editar Usuário' : 'Novo Gestor'}</h2>
+                            <button className="btn-icon" onClick={() => setModalOpen(false)}><X size={20} /></button>
+                        </div>
+                        <form onSubmit={handleSubmit} className="modal-body">
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Nome *</label>
+                                    <input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                                </div>
+                                <div className="form-group">
+                                    <label>Email *</label>
+                                    <input type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+                                </div>
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Telefone</label>
+                                    <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+                                </div>
+                                <div className="form-group">
+                                    <label>Perfil</label>
+                                    <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+                                        <option value="gestor">Gestor</option>
+                                        <option value="admin">Admin</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Status</label>
+                                    <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+                                        <option value="ativo">Ativo</option>
+                                        <option value="inativo">Inativo</option>
+                                    </select>
+                                </div>
+                                {!editing && (
+                                    <div className="form-group">
+                                        <label>Senha *</label>
+                                        <input type="password" required={!editing} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+                                    </div>
+                                )}
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setModalOpen(false)}>Cancelar</button>
+                                <button type="submit" className="btn btn-primary">{editing ? 'Salvar' : 'Criar'}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Reset Password Modal */}
+            {resetModal && (
+                <div className="modal-overlay" onClick={() => setResetModal(null)}>
+                    <div className="modal modal-sm" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>Redefinir Senha</h2>
+                            <button className="btn-icon" onClick={() => setResetModal(null)}><X size={20} /></button>
+                        </div>
+                        <form onSubmit={handleResetPassword} className="modal-body">
+                            <p className="modal-subtitle">Usuário: <strong>{resetModal.name}</strong></p>
+                            <div className="form-group">
+                                <label>Nova Senha *</label>
+                                <input type="password" required minLength={6} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setResetModal(null)}>Cancelar</button>
+                                <button type="submit" className="btn btn-primary">Redefinir</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\Kanban.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
+import api from '../services/api';
+import { Calendar, Flag, User, Filter, Archive } from 'lucide-react';
+import TaskModal from '../components/TaskModal';
+
+const COLUMNS = [
+    { id: 'backlog', title: 'Backlog', color: '#6366f1' },
+    { id: 'todo', title: 'To Do', color: '#3b82f6' },
+    { id: 'em-andamento', title: 'Em Andamento', color: '#f59e0b' },
+    { id: 'revisao', title: 'Revisão', color: '#8b5cf6' },
+    { id: 'concluido', title: 'Concluído', color: '#10b981' },
+];
+
+const PRIORITY_LABELS = { baixa: 'Baixa', media: 'Média', alta: 'Alta', urgente: 'Urgente' };
+const PRIORITY_COLORS = { baixa: '#3b82f6', media: '#f59e0b', alta: '#f97316', urgente: '#ef4444' };
+
+export default function Kanban() {
+    const [tasks, setTasks] = useState([]);
+    const [providers, setProviders] = useState([]);
+    const [filterProvider, setFilterProvider] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [selectedTask, setSelectedTask] = useState(null);
+
+    const loadData = async () => {
+        try {
+            const params = { limit: 500 };
+            const [taskRes, provRes] = await Promise.all([
+                api.get('/tasks', { params }),
+                api.get('/providers', { params: { status: 'ativo', limit: 200 } })
+            ]);
+            setTasks(taskRes.data.data.tasks);
+            setProviders(provRes.data.data.providers);
+        } catch (err) { console.error(err); }
+        finally { setLoading(false); }
+    };
+
+    useEffect(() => { loadData(); }, []);
+
+    const getColumnTasks = (columnId) => {
+        return tasks
+            .filter(t => t.status === columnId)
+            .filter(t => !filterProvider || t.providerId?._id === filterProvider);
+    };
+
+    const handleDragEnd = async (result) => {
+        if (!result.destination) return;
+        const { draggableId, destination } = result;
+        const newStatus = destination.droppableId;
+
+        // Optimistic update
+        setTasks(prev => prev.map(t => t._id === draggableId ? { ...t, status: newStatus } : t));
+
+        try {
+            await api.post(`/tasks/${draggableId}/move`, { status: newStatus });
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao mover tarefa');
+            loadData(); // Revert
+        }
+    };
+
+    const formatDate = (d) => d ? new Date(d).toLocaleDateString('pt-BR') : '';
+    const formatDateTime = (d) => d ? new Date(d).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '';
+    const isOverdue = (t) => t.dueDate && new Date(t.dueDate) < new Date() && t.status !== 'concluido';
+
+    const handleArchive = async () => {
+        if (!window.confirm('Deseja arquivar todas as tarefas concluídas? Elas sairão do Kanban mas ficarão salvas na Auditoria.')) return;
+        try {
+            await api.post('/tasks/archive');
+            loadData();
+        } catch (err) {
+            alert('Erro ao arquivar tarefas');
+        }
+    };
+
+    if (loading) return <div className="page-loading"><div className="spinner"></div></div>;
+
+    return (
+        <div className="page page-kanban">
+            <div className="page-header">
+                <div>
+                    <h1>Kanban</h1>
+                    <p>Arraste e solte para mover tarefas</p>
+                </div>
+                <div className="page-header-actions" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                    <button className="btn btn-sm btn-outline" onClick={handleArchive}>
+                        <Archive size={16} /> Arquivar Concluídas
+                    </button>
+                    <div className="kanban-filter">
+                        <Filter size={16} />
+                        <select value={filterProvider} onChange={(e) => setFilterProvider(e.target.value)}>
+                            <option value="">Todos os Contratantes</option>
+                            {providers.map((p) => (
+                                <option key={p._id} value={p._id}>{p.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <DragDropContext onDragEnd={handleDragEnd}>
+                <div className="kanban-board">
+                    {COLUMNS.map((col) => {
+                        const columnTasks = getColumnTasks(col.id);
+                        return (
+                            <div key={col.id} className="kanban-column">
+                                <div className="kanban-column-header" style={{ borderTopColor: col.color }}>
+                                    <h3>{col.title}</h3>
+                                    <span className="kanban-count">{columnTasks.length}</span>
+                                </div>
+                                <Droppable droppableId={col.id}>
+                                    {(provided, snapshot) => (
+                                        <div
+                                            ref={provided.innerRef}
+                                            {...provided.droppableProps}
+                                            className={`kanban-column-body ${snapshot.isDraggingOver ? 'drag-over' : ''}`}
+                                        >
+                                            {columnTasks.map((task, index) => (
+                                                <Draggable key={task._id} draggableId={task._id} index={index}>
+                                                    {(provided, snapshot) => (
+                                                        <div
+                                                            ref={provided.innerRef}
+                                                            {...provided.draggableProps}
+                                                            {...provided.dragHandleProps}
+                                                            className={`kanban-card ${snapshot.isDragging ? 'dragging' : ''} ${isOverdue(task) ? 'overdue' : ''}`}
+                                                            onClick={() => setSelectedTask(task)}
+                                                        >
+                                                            <div className="kanban-card-title">{task.title}</div>
+                                                            <div className="kanban-card-created">Entrada: {formatDateTime(task.createdAt)}</div>
+                                                            {task.description && (
+                                                                <p className="kanban-card-desc">{task.description.substring(0, 80)}{task.description.length > 80 ? '...' : ''}</p>
+                                                            )}
+                                                            <div className="kanban-card-meta">
+                                                                {task.checklists && task.checklists.length > 0 && (
+                                                                    <span className="badge badge-gray" style={{ background: '#f4f5f7', color: '#172b4d', fontSize: '10px', padding: '2px 6px' }}>
+                                                                        {task.checklists.length}
+                                                                    </span>
+                                                                )}
+                                                                <span
+                                                                    className="priority-dot"
+                                                                    style={{ background: PRIORITY_COLORS[task.priority] }}
+                                                                    title={PRIORITY_LABELS[task.priority]}
+                                                                ></span>
+                                                                {task.providerId && (
+                                                                    <span className="kanban-card-provider">
+                                                                        <User size={12} /> {task.providerId.name}
+                                                                    </span>
+                                                                )}
+                                                                {task.dueDate && (
+                                                                    <span className={`kanban-card-date ${isOverdue(task) ? 'overdue-text' : ''}`}>
+                                                                        <Calendar size={12} /> {formatDate(task.dueDate)}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </Draggable>
+                                            ))}
+                                            {provided.placeholder}
+                                        </div>
+                                    )}
+                                </Droppable>
+                            </div>
+                        );
+                    })}
+                </div>
+            </DragDropContext>
+
+            {selectedTask && (
+                <TaskModal
+                    task={selectedTask}
+                    onClose={() => setSelectedTask(null)}
+                    onUpdate={(updatedTask) => {
+                        setSelectedTask(updatedTask);
+                        setTasks(prev => prev.map(t => t._id === updatedTask._id ? updatedTask : t));
+                    }}
+                />
+            )}
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\Login.jsx
+================================================================================
+
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { Briefcase, Eye, EyeOff } from 'lucide-react';
+
+export default function Login() {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [showPass, setShowPass] = useState(false);
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+    const { login } = useAuth();
+    const navigate = useNavigate();
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+        try {
+            await login(email, password);
+            navigate('/');
+        } catch (err) {
+            setError(err.response?.data?.error || 'Erro ao fazer login');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="login-page">
+            <div className="login-card">
+                <div className="login-header">
+                    <div className="login-logo">
+                        <Briefcase size={40} />
+                    </div>
+                    <h1>Gestão PJ</h1>
+                    <p>Sistema de Gestão de Prestadores</p>
+                </div>
+
+                <form onSubmit={handleSubmit} className="login-form">
+                    {error && <div className="alert alert-error">{error}</div>}
+
+                    <div className="form-group">
+                        <label htmlFor="email">Email</label>
+                        <input
+                            id="email"
+                            type="email"
+                            placeholder="seu@email.com"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            required
+                            autoFocus
+                        />
+                    </div>
+
+                    <div className="form-group">
+                        <label htmlFor="password">Senha</label>
+                        <div className="password-input">
+                            <input
+                                id="password"
+                                type={showPass ? 'text' : 'password'}
+                                placeholder="••••••••"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                required
+                            />
+                            <button
+                                type="button"
+                                className="password-toggle"
+                                onClick={() => setShowPass(!showPass)}
+                            >
+                                {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
+                            </button>
+                        </div>
+                    </div>
+
+                    <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
+                        {loading ? 'Entrando...' : 'Entrar'}
+                    </button>
+                </form>
+            </div>
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\Prestadores.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
+import { Plus, Search, Edit2, Trash2, X } from 'lucide-react';
+
+export default function Prestadores() {
+    const { isAdmin } = useAuth();
+    const [providers, setProviders] = useState([]);
+    const [managers, setManagers] = useState([]);
+    const [search, setSearch] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [modalOpen, setModalOpen] = useState(false);
+    const [editing, setEditing] = useState(null);
+    const [form, setForm] = useState({
+        name: '', cnpj: '', email: '', phone: '', specialty: '', status: 'ativo', notes: '', managerId: ''
+    });
+
+    // Pagination state
+    const [page, setPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const limit = 50;
+
+    const loadProviders = async () => {
+        try {
+            const res = await api.get('/providers', { params: { q: search, page, limit } });
+            setProviders(res.data.data.providers);
+            setTotalPages(Math.ceil(res.data.data.total / limit));
+        } catch (err) { console.error(err); }
+    };
+
+    const loadManagers = async () => {
+        if (!isAdmin) return;
+        try {
+            const res = await api.get('/users', { params: { role: 'gestor', status: 'ativo', limit: 200 } });
+            setManagers(res.data.data.users);
+        } catch (err) { console.error(err); }
+    };
+
+    useEffect(() => {
+        Promise.all([loadProviders(), loadManagers()]).finally(() => setLoading(false));
+    }, []);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setPage(1);
+            loadProviders();
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [search]);
+
+    useEffect(() => {
+        loadProviders();
+    }, [page]);
+
+    const openModal = (provider = null) => {
+        if (provider) {
+            setEditing(provider);
+            setForm({
+                name: provider.name, cnpj: provider.cnpj, email: provider.email || '',
+                phone: provider.phone || '', specialty: provider.specialty || '',
+                status: provider.status, notes: provider.notes || '',
+                managerId: provider.managerId?._id || ''
+            });
+        } else {
+            setEditing(null);
+            setForm({ name: '', cnpj: '', email: '', phone: '', specialty: '', status: 'ativo', notes: '', managerId: '' });
+        }
+        setModalOpen(true);
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+            const payload = { ...form };
+            if (!isAdmin) delete payload.managerId;
+            if (payload.managerId === '') payload.managerId = null;
+
+            if (editing) {
+                await api.patch(`/providers/${editing._id}`, payload);
+            } else {
+                await api.post('/providers', payload);
+            }
+            setModalOpen(false);
+            loadProviders();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao salvar');
+        }
+    };
+
+    const handleDelete = async (id) => {
+        if (!confirm('Deseja remover este prestador?')) return;
+        try {
+            await api.delete(`/providers/${id}`);
+            loadProviders();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao remover');
+        }
+    };
+
+    if (loading) return <div className="page-loading"><div className="spinner"></div></div>;
+
+    return (
+        <div className="page">
+            <div className="page-header">
+                <div>
+                    <h1>Contratantes</h1>
+                    <p>Gerenciamento de contratantes PJ</p>
+                </div>
+                <button className="btn btn-primary" onClick={() => openModal()}>
+                    <Plus size={18} /> Novo Contratante
+                </button>
+            </div>
+
+            <div className="search-bar">
+                <Search size={18} />
+                <input
+                    type="text"
+                    placeholder="Buscar por nome ou CNPJ..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                />
+            </div>
+
+            <div className="table-container">
+                <table className="data-table">
+                    <thead>
+                        <tr>
+                            <th>Nome</th>
+                            <th>CNPJ</th>
+                            <th>Especialidade</th>
+                            <th>Status</th>
+                            {isAdmin && <th>Gestor</th>}
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {providers.length === 0 && (
+                            <tr><td colSpan={isAdmin ? 6 : 5} className="empty-text">Nenhum contratante encontrado</td></tr>
+                        )}
+                        {providers.map((p) => (
+                            <tr key={p._id}>
+                                <td className="td-bold">{p.name}</td>
+                                <td>{p.cnpj}</td>
+                                <td>{p.specialty || '—'}</td>
+                                <td>
+                                    <span className={`badge badge-${p.status === 'ativo' ? 'green' : 'gray'}`}>
+                                        {p.status}
+                                    </span>
+                                </td>
+                                {isAdmin && <td>{p.managerId?.name || '—'}</td>}
+                                <td>
+                                    <div className="actions">
+                                        <button className="btn-icon" onClick={() => openModal(p)} title="Editar"><Edit2 size={16} /></button>
+                                        <button className="btn-icon btn-icon-danger" onClick={() => handleDelete(p._id)} title="Remover"><Trash2 size={16} /></button>
+                                    </div>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            {totalPages > 1 && (
+                <div className="pagination">
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        disabled={page === 1}
+                        onClick={() => setPage(p => p - 1)}
+                    >
+                        Anterior
+                    </button>
+                    <span className="pagination-info">Página {page} de {totalPages}</span>
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        disabled={page === totalPages}
+                        onClick={() => setPage(p => p + 1)}
+                    >
+                        Próxima
+                    </button>
+                </div>
+            )}
+
+            {modalOpen && (
+                <div className="modal-overlay" onClick={() => setModalOpen(false)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>{editing ? 'Editar Contratante' : 'Novo Contratante'}</h2>
+                            <button className="btn-icon" onClick={() => setModalOpen(false)}><X size={20} /></button>
+                        </div>
+                        <form onSubmit={handleSubmit} className="modal-body">
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Nome *</label>
+                                    <input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                                </div>
+                                <div className="form-group">
+                                    <label>CNPJ</label>
+                                    <input value={form.cnpj} onChange={(e) => setForm({ ...form, cnpj: e.target.value })} />
+                                </div>
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Email</label>
+                                    <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+                                </div>
+                                <div className="form-group">
+                                    <label>Telefone</label>
+                                    <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+                                </div>
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Especialidade</label>
+                                    <input value={form.specialty} onChange={(e) => setForm({ ...form, specialty: e.target.value })} />
+                                </div>
+                                <div className="form-group">
+                                    <label>Status</label>
+                                    <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+                                        <option value="ativo">Ativo</option>
+                                        <option value="inativo">Inativo</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {isAdmin && (
+                                <div className="form-group">
+                                    <label>Gestor Responsável</label>
+                                    <select value={form.managerId} onChange={(e) => setForm({ ...form, managerId: e.target.value })}>
+                                        <option value="">Sem gestor</option>
+                                        {managers.map((m) => (
+                                            <option key={m._id} value={m._id}>{m.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+                            <div className="form-group">
+                                <label>Observações</label>
+                                <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setModalOpen(false)}>Cancelar</button>
+                                <button type="submit" className="btn btn-primary">{editing ? 'Salvar' : 'Criar'}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\Relatorios.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
+import { BarChart3, TrendingUp, Activity, PieChart } from 'lucide-react';
+
+export default function Relatorios() {
+    const { isAdmin } = useAuth();
+    const [provPerf, setProvPerf] = useState([]);
+    const [managerPerf, setManagerPerf] = useState([]);
+    const [distribution, setDistribution] = useState([]);
+    const [timeline, setTimeline] = useState([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const promises = [
+            api.get('/reports/provider-performance'),
+            api.get('/reports/task-distribution'),
+            api.get('/reports/timeline?limit=15'),
+        ];
+        if (isAdmin) promises.push(api.get('/reports/manager-performance'));
+
+        Promise.all(promises).then((results) => {
+            setProvPerf(results[0].data.data.performance);
+            setDistribution(results[1].data.data.distribution);
+            setTimeline(results[2].data.data.activities);
+            if (isAdmin && results[3]) setManagerPerf(results[3].data.data.performance);
+        }).catch(console.error).finally(() => setLoading(false));
+    }, [isAdmin]);
+
+    const formatDate = (d) => {
+        if (!d) return '';
+        return new Date(d).toLocaleDateString('pt-BR', {
+            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+        });
+    };
+
+    const STATUS_LABELS = {
+        'pendente': 'Pendente', 'backlog': 'Backlog', 'todo': 'To Do',
+        'em-andamento': 'Em Andamento', 'revisao': 'Revisão', 'concluido': 'Concluído'
+    };
+    const STATUS_COLORS = {
+        'pendente': '#f59e0b', 'backlog': '#6366f1', 'todo': '#3b82f6',
+        'em-andamento': '#f97316', 'revisao': '#8b5cf6', 'concluido': '#10b981'
+    };
+
+    if (loading) return <div className="page-loading"><div className="spinner"></div></div>;
+
+    const totalTasks = distribution.reduce((acc, d) => acc + d.count, 0);
+
+    return (
+        <div className="page">
+            <div className="page-header">
+                <h1>Relatórios</h1>
+                <p>Análise de desempenho e métricas</p>
+            </div>
+
+            {/* Task Distribution */}
+            <div className="report-section">
+                <div className="section-header">
+                    <PieChart size={20} />
+                    <h2>Distribuição de Tarefas</h2>
+                </div>
+                <div className="distribution-grid">
+                    {distribution.map((d) => (
+                        <div key={d.status} className="distribution-item">
+                            <div className="distribution-bar-container">
+                                <div
+                                    className="distribution-bar"
+                                    style={{
+                                        width: `${totalTasks > 0 ? (d.count / totalTasks) * 100 : 0}%`,
+                                        background: STATUS_COLORS[d.status]
+                                    }}
+                                ></div>
+                            </div>
+                            <div className="distribution-info">
+                                <span className="distribution-label">{STATUS_LABELS[d.status]}</span>
+                                <span className="distribution-count">{d.count}</span>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            {/* Provider Performance */}
+            <div className="report-section">
+                <div className="section-header">
+                    <TrendingUp size={20} />
+                    <h2>Desempenho por Contratante</h2>
+                </div>
+                {provPerf.length === 0 && <p className="empty-text">Nenhum contratante ativo</p>}
+                <div className="performance-list">
+                    {provPerf.map((p) => (
+                        <div key={p.provider._id} className="performance-item">
+                            <div className="performance-header">
+                                <span className="performance-name">{p.provider.name}</span>
+                                <span className="performance-stats">
+                                    {p.concluidas}/{p.total} concluídas
+                                    {p.atrasadas > 0 && <span className="overdue-text"> · {p.atrasadas} atrasadas</span>}
+                                </span>
+                            </div>
+                            <div className="progress-bar">
+                                <div className="progress-fill" style={{ width: `${p.percentual}%` }}></div>
+                            </div>
+                            <span className="performance-pct">{p.percentual}%</span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            {/* Manager Performance (Admin only) */}
+            {isAdmin && managerPerf.length > 0 && (
+                <div className="report-section">
+                    <div className="section-header">
+                        <BarChart3 size={20} />
+                        <h2>Desempenho por Gestor</h2>
+                    </div>
+                    <div className="performance-list">
+                        {managerPerf.map((m) => (
+                            <div key={m.manager._id} className="performance-item">
+                                <div className="performance-header">
+                                    <span className="performance-name">{m.manager.name} <small>({m.manager.role})</small></span>
+                                    <span className="performance-stats">
+                                        {m.concluidas}/{m.total} concluídas
+                                        {m.atrasadas > 0 && <span className="overdue-text"> · {m.atrasadas} atrasadas</span>}
+                                    </span>
+                                </div>
+                                <div className="progress-bar">
+                                    <div className="progress-fill" style={{ width: `${m.percentual}%` }}></div>
+                                </div>
+                                <span className="performance-pct">{m.percentual}%</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Timeline */}
+            <div className="report-section">
+                <div className="section-header">
+                    <Activity size={20} />
+                    <h2>Timeline de Atividades</h2>
+                </div>
+                <div className="activities-list">
+                    {timeline.length === 0 && <p className="empty-text">Nenhuma atividade</p>}
+                    {timeline.map((a) => (
+                        <div key={a._id} className="activity-item">
+                            <div className="activity-dot"></div>
+                            <div className="activity-content">
+                                <p className="activity-message">{a.message}</p>
+                                <span className="activity-meta">
+                                    {a.actorId?.name || 'Sistema'} · {formatDate(a.createdAt)}
+                                </span>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\pages\TodoGeral.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import api from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
+import { Plus, Search, ArrowRight, X, Calendar, Flag, SendHorizonal, Archive } from 'lucide-react';
+import TaskModal from '../components/TaskModal';
+
+const PRIORITY_LABELS = { baixa: 'Baixa', media: 'Média', alta: 'Alta', urgente: 'Urgente' };
+const PRIORITY_COLORS = { baixa: 'blue', media: 'yellow', alta: 'orange', urgente: 'red' };
+
+export default function TodoGeral() {
+    const { isAdmin } = useAuth();
+    const [tasks, setTasks] = useState([]);
+    const [providers, setProviders] = useState([]);
+    const [filter, setFilter] = useState('todas');
+    const [search, setSearch] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [showCreate, setShowCreate] = useState(false);
+    const [allocModal, setAllocModal] = useState(null);
+    const [createForm, setCreateForm] = useState({ title: '', description: '', priority: 'media', dueDate: '' });
+    const [allocForm, setAllocForm] = useState({ providerId: '', status: 'backlog' });
+    const [quickAdd, setQuickAdd] = useState('');
+    const [quickAdding, setQuickAdding] = useState(false);
+    const [selectedTask, setSelectedTask] = useState(null);
+
+    // Pagination state
+    const [page, setPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const limit = 50;
+
+    const [showSearch, setShowSearch] = useState(false);
+
+    const loadTasks = async () => {
+        try {
+            const params = { page, limit, q: search };
+            if (filter === 'pendentes') params.status = 'backlog';
+
+            const res = await api.get('/tasks', { params });
+            const { tasks: list, total } = res.data.data;
+
+            // Front-end filters for "alocadas" (legacy or edge cases)
+            let filteredList = list;
+            if (filter === 'alocadas') filteredList = filteredList.filter(t => t.providerId);
+
+            setTasks(filteredList);
+            setTotalPages(Math.ceil(total / limit));
+        } catch (err) { console.error(err); }
+    };
+
+    const loadProviders = async () => {
+        try {
+            const res = await api.get('/providers', { params: { status: 'ativo', limit: 200 } });
+            setProviders(res.data.data.providers);
+        } catch (err) { console.error(err); }
+    };
+
+    useEffect(() => {
+        Promise.all([loadTasks(), loadProviders()]).finally(() => setLoading(false));
+    }, []);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setPage(1); // Reset to page 1 on search/filter change
+            loadTasks();
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [search, filter]);
+
+    useEffect(() => {
+        loadTasks();
+    }, [page]);
+
+    const handleCreate = async (e) => {
+        e.preventDefault();
+        try {
+            await api.post('/tasks', createForm);
+            setCreateForm({ title: '', description: '', priority: 'media', dueDate: '' });
+            setShowCreate(false);
+            loadTasks();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao criar tarefa');
+        }
+    };
+
+    const handleQuickAdd = async (e) => {
+        if (e.key !== 'Enter' || !quickAdd.trim()) return;
+        setQuickAdding(true);
+        try {
+            await api.post('/tasks', { title: quickAdd.trim() });
+            setQuickAdd('');
+            loadTasks();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao criar tarefa');
+        } finally {
+            setQuickAdding(false);
+        }
+    };
+
+    const handleAllocate = async (e) => {
+        e.preventDefault();
+        try {
+            await api.post(`/tasks/${allocModal._id}/allocate`, allocForm);
+            setAllocModal(null);
+            setAllocForm({ providerId: '', status: 'backlog' });
+            loadTasks();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Erro ao alocar');
+        }
+    };
+
+    const formatDate = (d) => d ? new Date(d).toLocaleDateString('pt-BR') : '—';
+    const formatDateTime = (d) => d ? new Date(d).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+    const isOverdue = (t) => t.dueDate && new Date(t.dueDate) < new Date() && t.status !== 'concluido';
+
+    const handleArchive = async () => {
+        if (!window.confirm('Deseja arquivar todas as tarefas concluídas? Elas sairão da lista mas ficarão salvas na Auditoria.')) return;
+        try {
+            await api.post('/tasks/archive');
+            loadTasks();
+        } catch (err) {
+            alert('Erro ao arquivar tarefas');
+        }
+    };
+
+    if (loading) return <div className="page-loading"><div className="spinner"></div></div>;
+
+    return (
+        <div className="page">
+            <div className="page-header">
+                <div>
+                    <h1>To-Do Geral</h1>
+                    <p>Gestão de tarefas e demandas</p>
+                </div>
+                <div className="page-header-actions" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                    <button className="btn btn-sm btn-outline" onClick={handleArchive}>
+                        <Archive size={16} /> Arquivar Concluídas
+                    </button>
+                    <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
+                        <Plus size={18} /> Nova Tarefa
+                    </button>
+                </div>
+            </div>
+
+            <div className="toolbar">
+                <div className={`search-container ${showSearch ? 'active' : ''}`}>
+                    {showSearch ? (
+                        <div className="search-bar animate-slide-in">
+                            <Search size={18} />
+                            <input
+                                autoFocus
+                                placeholder="Buscar tarefas..."
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                onBlur={() => !search && setShowSearch(false)}
+                            />
+                            <button className="btn-icon btn-sm" onClick={() => { setSearch(''); setShowSearch(false); }}>
+                                <X size={16} />
+                            </button>
+                        </div>
+                    ) : (
+                        <button className="btn-icon btn-search-trigger" onClick={() => setShowSearch(true)} title="Pesquisar">
+                            <Search size={22} />
+                        </button>
+                    )}
+                </div>
+                <div className="filter-tabs">
+                    {['todas', 'pendentes', 'alocadas'].map((f) => (
+                        <button
+                            key={f}
+                            className={`tab ${filter === f ? 'active' : ''}`}
+                            onClick={() => setFilter(f)}
+                        >
+                            {f.charAt(0).toUpperCase() + f.slice(1)}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            <div className="quick-add-bar">
+                <Plus size={18} className="quick-add-icon" />
+                <input
+                    type="text"
+                    placeholder="Digite o título da demanda e pressione Enter..."
+                    value={quickAdd}
+                    onChange={(e) => setQuickAdd(e.target.value)}
+                    onKeyDown={handleQuickAdd}
+                    disabled={quickAdding}
+                    autoComplete="off"
+                />
+                {quickAdd.trim() && (
+                    <button
+                        className="quick-add-btn"
+                        onClick={() => handleQuickAdd({ key: 'Enter' })}
+                        disabled={quickAdding}
+                    >
+                        <SendHorizonal size={18} />
+                    </button>
+                )}
+            </div>
+
+            <div className="task-list">
+                {tasks.length === 0 && <p className="empty-text">Nenhuma tarefa encontrada</p>}
+                {tasks.map((t) => (
+                    <div key={t._id} className={`task-card ${isOverdue(t) ? 'overdue' : ''}`} onClick={() => setSelectedTask(t)}>
+                        <div className="task-card-header">
+                            <div>
+                                <h3>{t.title}</h3>
+                                <div className="task-created-at">Entrada: {formatDateTime(t.createdAt)}</div>
+                            </div>
+                            <span className={`badge badge-${PRIORITY_COLORS[t.priority]}`}>
+                                <Flag size={12} /> {PRIORITY_LABELS[t.priority]}
+                            </span>
+                        </div>
+                        {t.description && <p className="task-desc">{t.description}</p>}
+                        <div className="task-card-meta">
+                            {t.checklists && t.checklists.length > 0 && (
+                                <span className="badge badge-gray" style={{ background: '#f4f5f7', color: '#172b4d' }}>
+                                    {t.checklists.length} {t.checklists.length === 1 ? 'checklist' : 'checklists'}
+                                </span>
+                            )}
+                            <span className={`badge badge-${(t.status === 'pendente' || t.status === 'backlog') ? 'yellow' : 'blue'}`}>
+                                {t.status}
+                            </span>
+                            {t.providerId && (
+                                <span className="badge badge-purple">{t.providerId.name}</span>
+                            )}
+                            {t.dueDate && (
+                                <span className={`task-due ${isOverdue(t) ? 'overdue-text' : ''}`}>
+                                    <Calendar size={12} /> {formatDate(t.dueDate)}
+                                </span>
+                            )}
+                        </div>
+                        <div className="task-card-actions">
+                            {(t.status === 'pendente' || t.status === 'backlog') && !t.providerId && (
+                                <button
+                                    className="btn btn-sm btn-accent"
+                                    onClick={(e) => { e.stopPropagation(); setAllocModal(t); setAllocForm({ providerId: '', status: 'backlog' }); }}
+                                >
+                                    <ArrowRight size={14} /> Alocar
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {selectedTask && (
+                <TaskModal
+                    task={selectedTask}
+                    onClose={() => setSelectedTask(null)}
+                    onUpdate={(updatedTask) => {
+                        setSelectedTask(updatedTask);
+                        setTasks(prev => prev.map(t => t._id === updatedTask._id ? updatedTask : t));
+                    }}
+                />
+            )}
+
+            {totalPages > 1 && (
+                <div className="pagination">
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        disabled={page === 1}
+                        onClick={() => setPage(p => p - 1)}
+                    >
+                        Anterior
+                    </button>
+                    <span className="pagination-info">Página {page} de {totalPages}</span>
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        disabled={page === totalPages}
+                        onClick={() => setPage(p => p + 1)}
+                    >
+                        Próxima
+                    </button>
+                </div>
+            )}
+
+            {/* Create Modal */}
+            {showCreate && (
+                <div className="modal-overlay" onClick={() => setShowCreate(false)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>Nova Tarefa</h2>
+                            <button className="btn-icon" onClick={() => setShowCreate(false)}><X size={20} /></button>
+                        </div>
+                        <form onSubmit={handleCreate} className="modal-body">
+                            <div className="form-group">
+                                <label>Título *</label>
+                                <input required value={createForm.title} onChange={(e) => setCreateForm({ ...createForm, title: e.target.value })} />
+                            </div>
+                            <div className="form-group">
+                                <label>Descrição</label>
+                                <textarea rows={3} value={createForm.description} onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })} />
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label>Prioridade</label>
+                                    <select value={createForm.priority} onChange={(e) => setCreateForm({ ...createForm, priority: e.target.value })}>
+                                        <option value="baixa">Baixa</option>
+                                        <option value="media">Média</option>
+                                        <option value="alta">Alta</option>
+                                        <option value="urgente">Urgente</option>
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label>Prazo</label>
+                                    <input type="date" value={createForm.dueDate} onChange={(e) => setCreateForm({ ...createForm, dueDate: e.target.value })} />
+                                </div>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowCreate(false)}>Cancelar</button>
+                                <button type="submit" className="btn btn-primary">Criar Tarefa</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Allocate Modal */}
+            {allocModal && (
+                <div className="modal-overlay" onClick={() => setAllocModal(null)}>
+                    <div className="modal modal-sm" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>Alocar Contratante</h2>
+                            <button className="btn-icon" onClick={() => setAllocModal(null)}><X size={20} /></button>
+                        </div>
+                        <form onSubmit={handleAllocate} className="modal-body">
+                            <p className="modal-subtitle">Tarefa: <strong>{allocModal.title}</strong></p>
+                            <div className="form-group">
+                                <label>Contratante *</label>
+                                <select required value={allocForm.providerId} onChange={(e) => setAllocForm({ ...allocForm, providerId: e.target.value })}>
+                                    <option value="">Selecione...</option>
+                                    {providers.map((p) => (
+                                        <option key={p._id} value={p._id}>{p.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label>Status Inicial</label>
+                                <select value={allocForm.status} onChange={(e) => setAllocForm({ ...allocForm, status: e.target.value })}>
+                                    <option value="backlog">Backlog</option>
+                                    <option value="todo">To Do</option>
+                                </select>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setAllocModal(null)}>Cancelar</button>
+                                <button type="submit" className="btn btn-primary">Alocar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+================================================================================
+Arquivo: frontend\src\services\api.js
+================================================================================
+
+import axios from 'axios';
+
+const api = axios.create({
+    baseURL: `http://${window.location.hostname}:3015/api`,
+    headers: { 'Content-Type': 'application/json' }
+});
+
+// JWT interceptor
+api.interceptors.request.use((config) => {
+    const token = localStorage.getItem('token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
+// Response interceptor — redirect on 401
+api.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        if (error.response?.status === 401) {
+            localStorage.removeItem('token');
+            if (window.location.pathname !== '/login') {
+                window.location.href = '/login';
+            }
+        }
+        return Promise.reject(error);
+    }
+);
+
+export default api;
+
+
+================================================================================
+Arquivo: frontend\vite.config.js
+================================================================================
+
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 7153
+  }
+})
+
+
+================================================================================
+Arquivo: iniciar_oculto.vbs
+================================================================================
+
+Set WshShell = CreateObject("WScript.Shell")
+
+' Inicia o Backend oculto (janela invisivel)
+WshShell.Run "cmd /c cd /d ""c:\Projetos\TO DO IA\backend"" && npm start > ""c:\Projetos\TO DO IA\backend\backend.log"" 2>&1", 0, False
+
+' Inicia o Frontend oculto (janela invisivel)
+WshShell.Run "cmd /c cd /d ""c:\Projetos\TO DO IA\frontend"" && serve -s dist -l 7153 > ""c:\Projetos\TO DO IA\frontend\frontend.log"" 2>&1", 0, False
+
+
+
+================================================================================
+Arquivo: instalar_servico.bat
+================================================================================
+
+@echo off
+echo =======================================================
+echo Instalando o servico de inicializacao do TO DO IA...
+echo =======================================================
+
+copy "iniciar_oculto.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\iniciar_todo_ia.vbs" /Y
+
+echo.
+echo Instalacao concluida com sucesso!
+echo O sistema iniciara automaticamente oculto no proximo login.
+echo.
+pause
+
+
+================================================================================
+Arquivo: parar_sistema.bat
+================================================================================
+
+@echo off
+echo =======================================================
+echo Parando o sistema TO DO IA (processos Node.js)...
+echo =======================================================
+
+taskkill /F /IM node.exe
+
+echo.
+echo Processos encerrados. O backend e o frontend vinculados ao Node foram finalizados.
+echo.
+pause
+
+
+================================================================================
+Arquivo: remover_servico.bat
+================================================================================
+
+@echo off
+echo =======================================================
+echo Removendo o servico de inicializacao do TO DO IA...
+echo =======================================================
+
+if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\iniciar_todo_ia.vbs" (
+    del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\iniciar_todo_ia.vbs" /F /Q
+    echo.
+    echo Servico removido com sucesso. O sistema nao iniciara mais no login.
+) else (
+    echo.
+    echo O servico nao estava instalado.
+)
+
+echo.
+pause
+
+
+================================================================================
+Arquivo: trello_script.js
+================================================================================
+
+console.log('Checklists count: ' + data.checklists.length)
+
