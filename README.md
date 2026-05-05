@@ -1,110 +1,81 @@
-# Gestão PJ — Sistema de Gestão de Prestadores
+# 🚀 Gestão PJ — Sistema Inteligente de Gestão de Prestadores
 
-Sistema multiusuário para gestão de prestadores PJ, tarefas (To-Do + Kanban), relatórios e timeline de atividades. Com controle de acesso por perfil (Admin / Gestor).
+Sistema robusto e inteligente para gestão completa de prestadores de serviço PJ, combinando ferramentas de produtividade (Kanban), gestão documental (Contratos/Orçamentos) e inteligência artificial.
 
-## Stack
+![Status](https://img.shields.io/badge/status-active-success.svg)
+![React](https://img.shields.io/badge/react-18-blue.svg)
+![Node](https://img.shields.io/badge/node-18%2B-green.svg)
+![MongoDB](https://img.shields.io/badge/mongodb-latest-brightgreen.svg)
 
-- **Frontend:** React + Vite
-- **Backend:** Node.js + Express
-- **Banco:** MongoDB (Mongoose)
-- **Auth:** JWT + bcrypt
+## 🌟 Destaques
 
----
+- **🤖 Assistente IA Integrado**: Chat inteligente para suporte à gestão e consultas rápidas.
+- **📋 Kanban Dinâmico**: Fluxo de trabalho visual para tarefas de prestadores.
+- **📄 Gestão de Contratos e Orçamentos**: Controle completo de documentos e propostas.
+- **📚 Base de Conhecimento**: Central de documentação e procedimentos internos.
+- **📈 Dashboard e Relatórios**: Visão analítica de performance e timeline de atividades.
+- **🔐 Controle de Acesso (RBAC)**: Perfis diferenciados para Admin, Gestores e Prestadores.
 
-## Como Rodar Localmente
+## 🛠️ Tecnologias
+
+### Frontend
+- **React.js** com Vite
+- **Context API** para estado global
+- **CSS3 Moderno** com foco em UX/UI responsivo
+- **React Router** para navegação SPA
+
+### Backend
+- **Node.js** & **Express**
+- **MongoDB** (Mongoose ODM)
+- **JWT** (JSON Web Tokens) para autenticação segura
+- **Bcrypt** para criptografia de senhas
+
+## 📦 Estrutura do Sistema
+
+- **Dashboard**: Visão geral de métricas e KPIs.
+- **Kanban**: Gestão visual de tarefas por status.
+- **Prestadores**: Cadastro e acompanhamento de parceiros PJ.
+- **Contratos & Orçamentos**: Repositório e gestão de documentos financeiros.
+- **Base de Conhecimento**: Wiki interna com busca avançada.
+- **Timeline**: Histórico detalhado de todas as atividades do sistema.
+
+## 🚀 Como Iniciar
 
 ### Pré-requisitos
+- Node.js (v18+)
+- MongoDB (Local ou Atlas)
 
-- Node.js 18+
-- MongoDB rodando localmente (ou MongoDB Atlas)
+### Configuração Rápida
 
-### 1. Backend
-
-```bash
-cd backend
-cp .env.example .env
-# Edite o .env com sua MONGO_URI se necessário
-npm install
-npm run seed    # Cria o usuário admin
-npm run dev     # Inicia na porta 3000
-```
-
-### 2. Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev     # Inicia na porta 5173
-```
-
-### 3. Acessar
-
-- Abra `http://localhost:5173`
-- Login: `admin@gestaopj.com` / `Admin@123`
-
----
-
-## MongoDB Atlas
-
-Para usar Atlas em vez de MongoDB local:
-
-1. Crie um cluster em [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas)
-2. Copie a connection string
-3. No `backend/.env`, altere:
-   ```
-   MONGO_URI=mongodb+srv://usuario:senha@cluster.xxxxx.mongodb.net/gestao-pj
+1. **Backend**:
+   ```bash
+   cd backend
+   npm install
+   # Configure o .env (use .env.example como base)
+   npm run seed    # Cria o usuário admin inicial
+   npm run dev
    ```
 
----
+2. **Frontend**:
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
 
-## Usuários
+3. **Acesso**:
+   - URL: `http://localhost:5173`
+   - Credenciais padrão: `admin@gestaopj.com` / `Admin@123`
 
-| Tipo   | Acesse                                        |
-| ------ | --------------------------------------------- |
-| Admin  | Vê tudo, cria gestores, atribui prestadores   |
-| Gestor | Vê apenas prestadores e tarefas do seu escopo |
+## 🔒 Segurança e Perfis
 
-**Criar gestores:** Dashboard > Gestores > Novo Gestor (disponível apenas para Admin)
+- **Admin**: Acesso total ao sistema, gestão de usuários e configurações globais.
+- **Gestor**: Gerencia prestadores e tarefas sob sua responsabilidade.
+- **Auditoria**: Timeline completa de alterações para rastreabilidade.
 
----
+## 📝 Licença
 
-## Endpoints da API
-
-| Método | Rota                              | Descrição                    |
-| ------ | --------------------------------- | ---------------------------- |
-| POST   | /api/auth/login                   | Login                        |
-| GET    | /api/auth/me                      | Usuário logado               |
-| GET    | /api/users                        | Listar usuários (admin)      |
-| POST   | /api/users                        | Criar usuário (admin)        |
-| PATCH  | /api/users/:id                    | Editar usuário (admin)       |
-| DELETE | /api/users/:id                    | Remover usuário (admin)      |
-| PATCH  | /api/users/:id/reset-password     | Redefinir senha (admin)      |
-| GET    | /api/providers                    | Listar prestadores           |
-| POST   | /api/providers                    | Criar prestador              |
-| GET    | /api/providers/:id                | Detalhe prestador            |
-| PATCH  | /api/providers/:id                | Editar prestador             |
-| DELETE | /api/providers/:id                | Remover prestador            |
-| GET    | /api/tasks                        | Listar tarefas               |
-| POST   | /api/tasks                        | Criar tarefa                 |
-| PATCH  | /api/tasks/:id                    | Editar tarefa                |
-| DELETE | /api/tasks/:id                    | Remover tarefa               |
-| POST   | /api/tasks/:id/move               | Mover tarefa (Kanban)        |
-| POST   | /api/tasks/:id/allocate           | Alocar tarefa a prestador    |
-| GET    | /api/activities                   | Listar atividades            |
-| GET    | /api/reports/summary              | Resumo (cards)               |
-| GET    | /api/reports/provider-performance | Desempenho por prestador     |
-| GET    | /api/reports/manager-performance  | Desempenho por gestor        |
-| GET    | /api/reports/task-distribution    | Distribuição por status      |
-| GET    | /api/reports/timeline             | Timeline de atividades       |
-| POST   | /api/admin/import                 | Importar dados do localStorage |
+Este projeto é privado e de uso interno. Todos os direitos reservados.
 
 ---
-
-## Variáveis de Ambiente (backend/.env)
-
-```
-PORT=3000
-MONGO_URI=mongodb://localhost:27017/gestao-pj
-JWT_SECRET=sua-chave-secreta
-CORS_ORIGIN=http://localhost:5173
-```
+Desenvolvido por **Everton Scheibel**
